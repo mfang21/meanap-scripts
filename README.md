@@ -33,7 +33,7 @@ Runs Q-Q plots, Shapiro-Wilk, and/or Kolmogorov-Smirnov tests on selected numeri
 
 The Python scripts depend only on `matplotlib`. `assess_normality.R` uses base R and requires no additional packages.
 
-### Installation Instructions (Terminal)
+### Instructions (Terminal)
 
 With [uv](https://docs.astral.sh/uv/):
 
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 R scripts run with any current R installation: `Rscript assess_normality.R ...`.
 
-### Installation Instructions (General)
+### Instructions (General)
 
 1. Install [Python](https://www.python.org/downloads/) (3.10 or later). Python.org builds include `tkinter`, which the `fr_boxplots.py` viewer requires.
 2. Install [R](https://cran.r-project.org/) if you plan to run `assess_normality.R`.
