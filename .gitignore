@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+
+# data / outputs — uncomment or adjust as needed
+*.csv
+*.png
+*.pdf
+
+.DS_Store
