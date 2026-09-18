@@ -21,35 +21,46 @@ pair, e.g. "R250929CT7A_DIV250" -> organoid "CT7", slice "CT7A".
 
 Usage
 -----
-Interactive viewer (default):
+Interactive viewer (default) opens in the web browser:
     python3 fr_boxplots.py NeuronalActivity_NodeLevel.csv
 
     Two drop-downs select the group ("All groups" gives the channel overview)
     and, within it, "All organoids" or a single organoid whose readings are
     highlighted. Hovering over any dot (an outlier or an individual reading)
-    shows the recording, slice, channel and FR it came from. The toolbar under
-    the plot saves the current figure at 300 dpi.
+    shows the recording, slice, channel and FR it came from; hovering over a
+    box shows its quartiles and whiskers. The camera button in the plot's
+    toolbar saves the current view as a PNG at (about) 300 dpi.
+
+    The viewer is one self-contained HTML file written to the system temp
+    directory. It loads the Plotly.js charting library from cdn.plot.ly, so
+    the first run on a machine needs an internet connection.
+
+Write the interactive viewer to a file (to share, or on a headless machine):
+    python3 fr_boxplots.py data.csv -o viewer.html
+    python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o viewer.html   # initial selection
 
 List what is in the file (groups -> organoids -> slices, with recording counts):
     python3 fr_boxplots.py data.csv --list
 
-Save a figure without opening a window:
+Save a static figure without opening anything:
     python3 fr_boxplots.py data.csv --grp all -o channel_overview.png
     python3 fr_boxplots.py data.csv --grp BCTL -o bctl_all.png
     python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o bctl_ct7.png
 
-Requires matplotlib (pip install matplotlib). Tkinter ships with python.org
-builds of Python.
+Requires matplotlib (pip install matplotlib).
 """
 
 from __future__ import annotations
 
 import argparse
 import csv
+import json
 import math
 import random
 import re
 import sys
+import tempfile
+import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
@@ -80,6 +91,11 @@ BOX_COLOR = "#52514e"        # neutral ink for boxes / whiskers / medians
 GRID_COLOR = "#e4e3df"
 MAX_SERIES = len(PALETTE)
 SAVE_DPI = 300               # resolution of figures saved from the viewer / CLI
+
+# Pinned so that a saved viewer keeps rendering the same way. The "cartesian"
+# partial bundle has the box and scatter traces this page needs at ~1/3 the size
+# of the full library.
+PLOTLY_JS_URL = "https://cdn.plot.ly/plotly-cartesian-3.7.0.min.js"
 
 
 @dataclass(frozen=True)
@@ -193,6 +209,20 @@ def box_records(records: list[Record], grp: str) -> list[Record]:
     return select(records, grp, None)
 
 
+def box_stats(records: list[Record], grp: str) -> dict[int, dict[str, float]]:
+    """Per-channel quartiles and whisker ends (1.5 x IQR, the same rule as ax.boxplot)."""
+    from matplotlib import cbook
+    by_channel: dict[int, list[float]] = defaultdict(list)
+    for r in box_records(records, grp):
+        by_channel[r.channel].append(r.fr)
+    stats = {}
+    for c, vals in by_channel.items():
+        st = cbook.boxplot_stats(vals, whis=1.5)[0]
+        stats[c] = {"q1": st["q1"], "med": st["med"], "q3": st["q3"],
+                    "whislo": st["whislo"], "whishi": st["whishi"], "n": len(vals)}
+    return stats
+
+
 def describe(records: list[Record]) -> None:
     for grp in groups(records):
         in_grp = [r for r in records if r.grp == grp]
@@ -230,76 +260,10 @@ def _legend(ax, title: str) -> None:
               loc="upper left", bbox_to_anchor=(1.01, 1.0))
 
 
-class HoverTooltip:
-    """Shows which recording a plotted point came from when the mouse is over it.
-
-    `draw()` registers every scatter artist it creates together with the
-    records behind its points (same order). The viewer connects `on_move` to
-    the canvas' motion events.
-    """
-
-    def __init__(self, ax):
-        self.ax = ax
-        self.targets: list[tuple[object, list[Record]]] = []
-        self.annot = None
-        self._current: tuple[int, int] | None = None
-
-    def reset(self) -> None:
-        """Call after `ax.clear()`: the old annotation is gone with the axes."""
-        self.targets.clear()
-        self._current = None
-        self.annot = self.ax.annotate(
-            "", xy=(0, 0), xytext=(12, 12), textcoords="offset points",
-            fontsize=8, color="#0b0b0b", zorder=10, annotation_clip=False,
-            bbox=dict(boxstyle="round,pad=0.4", fc="white", ec=BOX_COLOR, lw=0.8),
-        )
-        self.annot.set_visible(False)
-
-    def add(self, artist, recs: list[Record]) -> None:
-        self.targets.append((artist, recs))
-
-    @staticmethod
-    def text_for(r: Record) -> str:
-        return (f"{r.grp} \u00b7 {r.slice}\n"
-                f"Channel {r.channel}\nFR = {r.fr:.4g} Hz")
-
-    def on_move(self, event) -> None:
-        if self.annot is None:
-            return
-        hit = None
-        if event.inaxes is self.ax:
-            for t_idx, (artist, recs) in enumerate(self.targets):
-                found, info = artist.contains(event)
-                if found and len(info["ind"]):
-                    hit = (t_idx, int(info["ind"][0]))
-                    break
-        if hit == self._current:
-            return
-        self._current = hit
-        if hit is None:
-            self.annot.set_visible(False)
-        else:
-            artist, recs = self.targets[hit[0]]
-            x, y = artist.get_offsets()[hit[1]]
-            self.annot.xy = (x, y)
-            self.annot.set_text(self.text_for(recs[hit[1]]))
-            # Flip the label to the left near the right edge so it stays readable.
-            lo, hi = self.ax.get_xlim()
-            on_right = x > lo + 0.7 * (hi - lo)
-            self.annot.set_x(-12 if on_right else 12)
-            self.annot.set_ha("right" if on_right else "left")
-            self.annot.set_visible(True)
-        event.canvas.draw_idle()
-
-
-def _outliers(recs: list[Record], by_channel: dict[int, list[float]]) -> list[Record]:
-    """Records outside the whiskers, using the same rule as ax.boxplot (1.5 x IQR)."""
-    from matplotlib import cbook
-    bounds = {}
-    for c, vals in by_channel.items():
-        st = cbook.boxplot_stats(vals, whis=1.5)[0]
-        bounds[c] = (st["whislo"], st["whishi"])
-    return [r for r in recs if not bounds[r.channel][0] <= r.fr <= bounds[r.channel][1]]
+def _outliers(recs: list[Record], stats: dict[int, dict[str, float]]) -> list[Record]:
+    """Records beyond the whiskers of their channel's box."""
+    return [r for r in recs
+            if not stats[r.channel]["whislo"] <= r.fr <= stats[r.channel]["whishi"]]
 
 
 def _draw_boxes(ax, by_channel: dict[int, list[float]], channels: list[int],
@@ -316,31 +280,26 @@ def _draw_boxes(ax, by_channel: dict[int, list[float]], channels: list[int],
     )
 
 
-def _draw_outliers(ax, recs: list[Record], by_channel: dict[int, list[float]],
-                   pos_of: dict[int, int], hover: HoverTooltip | None) -> None:
+def _draw_outliers(ax, recs: list[Record], stats: dict[int, dict[str, float]],
+                   pos_of: dict[int, int]) -> None:
     """Grey dots for readings beyond 1.5 x IQR of their channel's box."""
-    outs = _outliers(recs, by_channel)
+    outs = _outliers(recs, stats)
     if not outs:
         return
-    sc = ax.scatter([pos_of[r.channel] for r in outs], [r.fr for r in outs],
-                    s=10, color=BOX_COLOR, alpha=0.6, linewidths=0, zorder=3)
-    if hover:
-        hover.add(sc, outs)
+    ax.scatter([pos_of[r.channel] for r in outs], [r.fr for r in outs],
+               s=10, color=BOX_COLOR, alpha=0.6, linewidths=0, zorder=3)
 
 
 def draw(ax, records: list[Record], grp: str, organoid: str | None,
-         show_points: bool = True, hover: HoverTooltip | None = None) -> None:
+         show_points: bool = True) -> None:
     """Draw per-channel FR box plots for the selection onto `ax`.
 
     Boxes always summarise the whole group (`grp`), or the whole file when
     `grp` is ALL_GROUPS. Selecting an organoid only changes which readings are
-    overlaid as points (that organoid's, coloured by slice). When `hover` is
-    given, every plotted point is registered with it for the tooltip.
+    overlaid as points (that organoid's, coloured by slice).
     """
     ax.clear()
     ax.set_axis_on()
-    if hover:
-        hover.reset()
     at_organoid_level = bool(organoid) and organoid != ALL_ORGANOIDS
 
     boxes = box_records(records, grp)
@@ -355,6 +314,7 @@ def draw(ax, records: list[Record], grp: str, organoid: str | None,
     by_channel: dict[int, list[float]] = defaultdict(list)
     for r in boxes:
         by_channel[r.channel].append(r.fr)
+    stats = box_stats(records, grp)
     channels = sorted(by_channel)
     positions = list(range(len(channels)))
     pos_of = {c: p for c, p in zip(channels, positions)}
@@ -363,10 +323,10 @@ def draw(ax, records: list[Record], grp: str, organoid: str | None,
 
     # ---- Channel overview: all groups, one box per channel ------------------
     # Grey dots are the box plot's outliers (readings more than 1.5 x IQR
-    # beyond the box edges); hover over one in the viewer to see its recording.
+    # beyond the box edges).
     if grp == ALL_GROUPS:
         _draw_boxes(ax, by_channel, channels, positions)
-        _draw_outliers(ax, boxes, by_channel, pos_of, hover)
+        _draw_outliers(ax, boxes, stats, pos_of)
         ax.set_title(f"Firing rate per channel: all groups   ({n_label})",
                      fontsize=11, loc="left", color="#0b0b0b")
         _style_axes(ax, channels, positions)
@@ -375,7 +335,7 @@ def draw(ax, records: list[Record], grp: str, organoid: str | None,
     # ---- Group view (optionally highlighting one organoid) ------------------
     _draw_boxes(ax, by_channel, channels, positions)
     if not show_points:
-        _draw_outliers(ax, boxes, by_channel, pos_of, hover)
+        _draw_outliers(ax, boxes, stats, pos_of)
 
     if show_points:
         # Points are coloured by organoid when the whole group is shown and by
@@ -400,11 +360,9 @@ def draw(ax, records: list[Record], grp: str, organoid: str | None,
             xs = [pos_of[r.channel] + rng.uniform(-0.18, 0.18) for r in pts]
             ys = [r.fr for r in pts]
             label = label_of(s)
-            sc = ax.scatter(xs, ys, s=14, color=color_of(s), alpha=0.75, linewidths=0,
-                            zorder=3, label=None if label in seen_labels else label)
+            ax.scatter(xs, ys, s=14, color=color_of(s), alpha=0.75, linewidths=0,
+                       zorder=3, label=None if label in seen_labels else label)
             seen_labels.add(label)
-            if hover:
-                hover.add(sc, pts)
         if seen_labels:
             _legend(ax, "Slice" if at_organoid_level else "Organoid")
 
@@ -425,81 +383,255 @@ def figure_size(records: list[Record], grp: str, organoid: str | None) -> tuple[
 # Interactive viewer
 # --------------------------------------------------------------------------- #
 
-def run_gui(records: list[Record], csv_path: Path, show_points: bool) -> None:
-    import tkinter as tk
-    from tkinter import ttk
+# The viewer is one self-contained HTML page: the parsed records and the box
+# statistics (computed above, in Python) are inlined as JSON, and the script
+# below only filters and displays them. It mirrors draw() one-to-one.
+VIEWER_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firing rate per channel</title>
+<style>
+  :root { --ink: #0b0b0b; --muted: #52514e; --line: #e4e3df; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink); background: #fff; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+  }
+  header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  select { font: inherit; padding: 3px 6px; }
+  #status { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  #plot { flex: 1; min-height: 320px; }
+  #banner {
+    margin: 16px; padding: 12px 16px; border: 1px solid #e34948; border-radius: 6px;
+    background: #fff5f5; color: #8a1f1f;
+  }
+</style>
+</head>
+<body>
+<header>
+  <label>Group <select id="grp"></select></label>
+  <label>Organoid <select id="org"></select></label>
+  <label><input type="checkbox" id="points"> Show individual readings</label>
+  <span id="status"></span>
+</header>
+<div id="banner" hidden>
+  Could not load the Plotly.js charting library from cdn.plot.ly. This viewer needs an
+  internet connection the first time it runs on a machine; reconnect and reload the page.
+</div>
+<div id="plot"></div>
+<script type="application/json" id="payload">__PAYLOAD__</script>
+<script type="application/json" id="initial">__INITIAL__</script>
+<script src="__PLOTLY_JS_URL__" onerror="document.getElementById('banner').hidden = false"></script>
+<script>
+(function () {
+  if (typeof Plotly === "undefined") {
+    document.getElementById("banner").hidden = false;
+    return;
+  }
+  const payload = JSON.parse(document.getElementById("payload").textContent);
+  const initial = JSON.parse(document.getElementById("initial").textContent);
+  const { allGroups, allOrganoids } = payload.labels;
+  const C = payload.colors;
+  const grpSel = document.getElementById("grp");
+  const orgSel = document.getElementById("org");
+  const pointsBox = document.getElementById("points");
+  const status = document.getElementById("status");
+  const HOVER = "%{customdata[0]} · %{customdata[1]}<br>Channel %{customdata[2]}"
+              + "<br>FR = %{customdata[3]:.4~g} Hz<br>%{customdata[4]}<extra></extra>";
 
-    import matplotlib
-    matplotlib.use("TkAgg")
-    # Figures saved from the toolbar's save button come out at SAVE_DPI.
-    # On-screen rendering stays at the display's own pixel density.
-    matplotlib.rcParams["savefig.dpi"] = SAVE_DPI
-    matplotlib.rcParams["savefig.bbox"] = "tight"
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-    from matplotlib.figure import Figure
+  document.title = "Firing rate per channel: " + payload.csv;
 
-    grps = [ALL_GROUPS] + groups(records)
+  function fill(sel, values, current) {
+    sel.innerHTML = "";
+    for (const v of values) {
+      const o = document.createElement("option");
+      o.value = o.textContent = v;
+      sel.appendChild(o);
+    }
+    sel.value = values.includes(current) ? current : values[0];
+  }
 
-    root = tk.Tk()
-    root.title(f"Firing rate per channel: {csv_path.name}")
+  function naturalKey(s) {
+    return s.split(/(\d+)/).map(t => (/^\d+$/.test(t) ? Number(t) : t.toLowerCase()));
+  }
+  function naturalCompare(a, b) {
+    const ka = naturalKey(a), kb = naturalKey(b);
+    for (let i = 0; i < Math.min(ka.length, kb.length); i++) {
+      if (ka[i] === kb[i]) continue;
+      if (typeof ka[i] !== typeof kb[i]) return String(ka[i]) < String(kb[i]) ? -1 : 1;
+      return ka[i] < kb[i] ? -1 : 1;
+    }
+    return ka.length - kb.length;
+  }
 
-    controls = ttk.Frame(root, padding=(10, 8))
-    controls.pack(side=tk.TOP, fill=tk.X)
+  // Seeded so that two exports of the same selection place the dots identically.
+  function rng(seed) {
+    let s = seed >>> 0;
+    return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  }
 
-    ttk.Label(controls, text="Group:").pack(side=tk.LEFT)
-    grp_var = tk.StringVar(value=grps[0])
-    grp_box = ttk.Combobox(controls, textvariable=grp_var, values=grps, state="readonly", width=12)
-    grp_box.pack(side=tk.LEFT, padx=(4, 16))
+  function render() {
+    const grp = grpSel.value, org = orgSel.value, showPoints = pointsBox.checked;
+    const atOrganoid = grp !== allGroups && org !== allOrganoids;
+    const stats = payload.stats[grp];
+    const channels = Object.keys(stats).map(Number).sort((a, b) => a - b);
+    const pos = new Map(channels.map((c, i) => [c, i]));
+    const boxes = payload.records.filter(r => grp === allGroups || r.g === grp);
+    const points = atOrganoid ? boxes.filter(r => r.o === org) : boxes;
+    const nFiles = new Set(boxes.map(r => r.f)).size;
 
-    ttk.Label(controls, text="Organoid:").pack(side=tk.LEFT)
-    org_var = tk.StringVar(value=ALL_ORGANOIDS)
-    org_box = ttk.Combobox(controls, textvariable=org_var, state="readonly", width=16)
-    org_box.pack(side=tk.LEFT, padx=(4, 16))
+    // One box trace per channel so that hovering a box names the channel.
+    // Positions are 0..n-1 on a linear axis labelled with the channel numbers,
+    // which leaves the jittered points free to sit at fractional x.
+    const traces = channels.map(c => ({
+      type: "box", name: `Channel ${c}`, x: [pos.get(c)],
+      q1: [stats[c].q1], median: [stats[c].med], q3: [stats[c].q3],
+      lowerfence: [stats[c].whislo], upperfence: [stats[c].whishi],
+      width: 0.55, line: { color: C.box, width: 1 }, fillcolor: "rgba(0,0,0,0)",
+      boxpoints: false, showlegend: false,
+    }));
 
-    points_var = tk.BooleanVar(value=show_points)
-    ttk.Checkbutton(controls, text="Show individual readings", variable=points_var).pack(side=tk.LEFT)
+    let legendTitle = "";
+    if (showPoints && grp !== allGroups) {
+      // Coloured by organoid for the whole group, by slice for one organoid.
+      // Series beyond the palette fold into "Other".
+      const key = atOrganoid ? (r => r.s) : (r => r.o);
+      const series = [...new Set(points.map(key))].sort(naturalCompare);
+      const named = series.length > payload.maxSeries ? series.slice(0, payload.maxSeries - 1) : series;
+      const colorOf = new Map(named.map((s, i) => [s, C.palette[i]]));
+      const rand = rng(0);
+      let otherShown = false;
+      for (const s of series) {
+        const pts = points.filter(r => key(r) === s);
+        const isOther = !colorOf.has(s);
+        traces.push({
+          type: "scatter", mode: "markers",
+          name: isOther ? "Other" : s, legendgroup: isOther ? "Other" : s,
+          showlegend: !(isOther && otherShown),
+          x: pts.map(r => pos.get(r.c) + (rand() * 0.36 - 0.18)), y: pts.map(r => r.fr),
+          marker: { size: 6, color: isOther ? C.other : colorOf.get(s), opacity: 0.75 },
+          customdata: pts.map(r => [r.g, r.s, r.c, r.fr, r.f]), hovertemplate: HOVER,
+        });
+        if (isOther) otherShown = true;
+      }
+      legendTitle = atOrganoid ? "Slice" : "Organoid";
+    } else {
+      const outs = boxes.filter(r => !(stats[r.c].whislo <= r.fr && r.fr <= stats[r.c].whishi));
+      if (outs.length) {
+        traces.push({
+          type: "scatter", mode: "markers", name: "Outlier", showlegend: false,
+          x: outs.map(r => pos.get(r.c)), y: outs.map(r => r.fr),
+          marker: { size: 5, color: C.box, opacity: 0.6 },
+          customdata: outs.map(r => [r.g, r.s, r.c, r.fr, r.f]), hovertemplate: HOVER,
+        });
+      }
+    }
 
-    status_var = tk.StringVar()
-    ttk.Label(controls, textvariable=status_var, foreground="#52514e").pack(side=tk.RIGHT)
+    const nLabel = `n = ${nFiles} recording${nFiles === 1 ? "" : "s"}`;
+    const title = grp === allGroups ? "Firing rate per channel: all groups"
+      : atOrganoid ? `Firing rate per channel: ${grp} boxes, ${org} readings highlighted`
+      : `Firing rate per channel: ${grp}`;
+    const crowded = channels.length > 30;
+    const axisLine = { showline: true, linecolor: C.grid, zeroline: false, ticks: "outside", tickcolor: C.grid };
 
-    fig = Figure(figsize=(12, 5.5), dpi=100)
-    ax = fig.add_subplot(111)
-    canvas = FigureCanvasTkAgg(fig, master=root)
-    NavigationToolbar2Tk(canvas, root).update()
-    canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+    const layout = {
+      title: { text: `${title}   (${nLabel})`, x: 0, xanchor: "left", font: { size: 15, color: "#0b0b0b" } },
+      xaxis: {
+        title: { text: "Channel" }, tickmode: "array",
+        tickvals: channels.map(c => pos.get(c)), ticktext: channels.map(String),
+        range: [-0.7, channels.length - 0.3], tickangle: crowded ? -90 : 0,
+        tickfont: { size: 10 }, showgrid: false, ...axisLine,
+      },
+      yaxis: { title: { text: "Firing rate (Hz)" }, gridcolor: C.grid, ...axisLine },
+      legend: { title: { text: legendTitle }, x: 1.01, y: 1, xanchor: "left", font: { size: 11 } },
+      showlegend: legendTitle !== "",
+      margin: { l: 60, r: 150, t: 60, b: crowded ? 70 : 50 },
+      hovermode: "closest", paper_bgcolor: "#fff", plot_bgcolor: "#fff",
+      font: { family: "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", color: "#52514e" },
+    };
+    const config = {
+      responsive: true, displaylogo: false, modeBarButtonsToRemove: ["select2d", "lasso2d"],
+      toImageButtonOptions: {
+        format: "png", scale: initial.scale,
+        filename: `fr_${grp}_${atOrganoid ? org : "all"}`.replace(/[^\w-]+/g, "_"),
+      },
+    };
+    Plotly.react("plot", traces, layout, config);
 
-    hover = HoverTooltip(ax)
-    canvas.mpl_connect("motion_notify_event", hover.on_move)
+    let msg = `boxes: ${nFiles} recordings, ${channels.length} channels`;
+    if (atOrganoid) {
+      msg += `   |   ${org}: ${new Set(points.map(r => r.f)).size} recordings, ${points.length} readings`;
+    }
+    status.textContent = msg;
+  }
 
-    def refresh(*_):
-        grp, org = grp_var.get(), org_var.get()
-        draw(ax, records, grp, org, points_var.get(), hover)
-        fig.subplots_adjust(left=0.06, right=0.86, top=0.9, bottom=0.16)
-        canvas.draw_idle()
-        boxes, pts = box_records(records, grp), select(records, grp, org)
-        msg = (f"boxes: {len({r.filename for r in boxes})} recordings, "
-               f"{len({r.channel for r in boxes})} channels")
-        if org != ALL_ORGANOIDS:
-            msg += f"   |   {org}: {len({r.filename for r in pts})} recordings, {len(pts)} readings"
-        status_var.set(msg)
+  function setGroup(org) {
+    const grp = grpSel.value;
+    const orgs = grp === allGroups ? [allOrganoids] : [allOrganoids, ...payload.organoids[grp]];
+    fill(orgSel, orgs, org);
+    orgSel.disabled = grp === allGroups;
+    render();
+  }
 
-    def on_group_change(*_):
-        grp = grp_var.get()
-        if grp == ALL_GROUPS:
-            org_box["values"] = [ALL_ORGANOIDS]
-            org_box.state(["disabled"])
-        else:
-            org_box["values"] = [ALL_ORGANOIDS] + organoids(records, grp)
-            org_box.state(["!disabled"])
-        org_var.set(ALL_ORGANOIDS)
-        refresh()
+  fill(grpSel, payload.groups, initial.grp);
+  pointsBox.checked = initial.showPoints;
+  grpSel.addEventListener("change", () => setGroup(allOrganoids));
+  orgSel.addEventListener("change", render);
+  pointsBox.addEventListener("change", render);
+  setGroup(initial.organoid);
+})();
+</script>
+</body>
+</html>
+"""
 
-    grp_box.bind("<<ComboboxSelected>>", on_group_change)
-    org_box.bind("<<ComboboxSelected>>", refresh)
-    points_var.trace_add("write", refresh)
 
-    on_group_change()
-    root.mainloop()
+def build_payload(records: list[Record], csv_name: str) -> dict:
+    grps = groups(records)
+    return {
+        "csv": csv_name,
+        "groups": [ALL_GROUPS] + grps,
+        "organoids": {g: organoids(records, g) for g in grps},
+        "stats": {g: box_stats(records, g) for g in [ALL_GROUPS] + grps},
+        "records": [{"f": r.filename, "g": r.grp, "c": r.channel, "fr": r.fr,
+                     "o": r.organoid, "s": r.slice} for r in records],
+        "colors": {"palette": PALETTE, "other": OTHER_COLOR, "box": BOX_COLOR, "grid": GRID_COLOR},
+        "maxSeries": MAX_SERIES,
+        "labels": {"allGroups": ALL_GROUPS, "allOrganoids": ALL_ORGANOIDS},
+    }
+
+
+def initial_state(grp: str | None = None, organoid: str | None = None,
+                  show_points: bool = True, dpi: int = SAVE_DPI) -> dict:
+    # Plotly's export scale multiplies CSS pixels, which browsers lay out at 96/inch.
+    return {"grp": grp or ALL_GROUPS, "organoid": organoid or ALL_ORGANOIDS,
+            "showPoints": show_points, "scale": round(dpi / 96, 2)}
+
+
+def _json_for_html(obj) -> str:
+    # A "</script>" inside a file name would otherwise end the JSON block early.
+    return json.dumps(obj).replace("</", "<\\/")
+
+
+def render_html(payload: dict, initial: dict) -> str:
+    return (VIEWER_HTML
+            .replace("__PLOTLY_JS_URL__", PLOTLY_JS_URL)
+            .replace("__PAYLOAD__", _json_for_html(payload))
+            .replace("__INITIAL__", _json_for_html(initial)))
+
+
+def open_viewer(records: list[Record], csv_path: Path, initial: dict) -> None:
+    html = render_html(build_payload(records, csv_path.name), initial)
+    out = Path(tempfile.gettempdir()) / f"fr_boxplots_{csv_path.stem}.html"
+    out.write_text(html, encoding="utf-8")
+    print(f"Viewer written to '{out}'; opening it in your browser.")
+    webbrowser.open(out.as_uri())
 
 
 # --------------------------------------------------------------------------- #
@@ -513,15 +645,17 @@ def parse_args():
     parser.add_argument("--list", action="store_true",
                         help="Print groups, organoids and slices found in the file, then exit.")
     parser.add_argument("--grp", help="Group to plot (e.g. BCTL), or 'all' for the channel overview "
-                                      "across every group. Required with -o.")
+                                      "across every group. Required for a static figure; sets the "
+                                      "initial selection of a saved viewer.")
     parser.add_argument("--organoid", help="Organoid whose readings to highlight on the group's boxes "
                                            "(e.g. CT7). Default: all organoids.")
     parser.add_argument("-o", "--output", type=Path,
-                        help="Save the figure to this path (png/pdf/svg) instead of opening the viewer.")
+                        help="Write to this path instead of opening the viewer: .html saves the "
+                             "interactive viewer, png/pdf/svg a static figure.")
     parser.add_argument("--no-points", action="store_true",
                         help="Do not overlay individual readings on the boxes (show outliers instead).")
     parser.add_argument("--dpi", type=int, default=SAVE_DPI,
-                        help=f"Resolution for saved figures (default {SAVE_DPI}).")
+                        help=f"Resolution for saved figures and the viewer's PNG export (default {SAVE_DPI}).")
     return parser.parse_args()
 
 
@@ -536,22 +670,38 @@ def main():
         return
 
     if args.output is None and args.grp is None:
-        run_gui(records, args.input_csv, show_points=not args.no_points)
+        open_viewer(records, args.input_csv,
+                    initial_state(show_points=not args.no_points, dpi=args.dpi))
         return
 
     grps = groups(records)
-    if args.grp.lower() == "all":
-        args.grp = ALL_GROUPS
-    elif args.grp not in grps:
-        sys.exit(f"Error: group '{args.grp}' not found. Available: all, {', '.join(grps)}")
-    if args.grp == ALL_GROUPS and args.organoid:
-        sys.exit("Error: --organoid cannot be combined with --grp all.")
-    if args.organoid and args.organoid not in organoids(records, args.grp):
-        sys.exit(f"Error: organoid '{args.organoid}' not found in {args.grp}. "
-                 f"Available: {', '.join(organoids(records, args.grp))}")
+    if args.grp is not None:
+        if args.grp.lower() == "all":
+            args.grp = ALL_GROUPS
+        elif args.grp not in grps:
+            sys.exit(f"Error: group '{args.grp}' not found. Available: all, {', '.join(grps)}")
+    if args.organoid:
+        if args.grp is None:
+            sys.exit("Error: --organoid requires --grp.")
+        if args.grp == ALL_GROUPS:
+            sys.exit("Error: --organoid cannot be combined with --grp all.")
+        if args.organoid not in organoids(records, args.grp):
+            sys.exit(f"Error: organoid '{args.organoid}' not found in {args.grp}. "
+                     f"Available: {', '.join(organoids(records, args.grp))}")
     if args.output is None:
         sys.exit("Error: --grp/--organoid without -o has nothing to do; add -o OUTPUT to save a figure "
                  "or omit them to open the interactive viewer.")
+
+    if args.output.suffix.lower() in (".html", ".htm"):
+        html = render_html(build_payload(records, args.input_csv.name),
+                           initial_state(args.grp, args.organoid, not args.no_points, args.dpi))
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_text(html, encoding="utf-8")
+        print(f"Saved '{args.output}'.")
+        return
+    if args.grp is None:
+        sys.exit("Error: --grp is required to save a static figure "
+                 "(use -o FILE.html to save the interactive viewer instead).")
 
     import matplotlib
     matplotlib.use("Agg")

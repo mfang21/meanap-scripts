@@ -5,12 +5,13 @@ Utility scripts for post-processing output from [MEA-NAP](https://github.com/SAN
 ## Scripts
 
 ### `fr_boxplots.py`
-Plots per-channel firing rate distributions from a MEA-NAP node-level CSV (`FileName`, `Grp`, `Channel`, `FR`). Opens an interactive viewer by default, with dropdowns for group and organoid and hover tooltips identifying the source recording of each point. Can also render directly to a file.
+Plots per-channel firing rate distributions from a MEA-NAP node-level CSV (`FileName`, `Grp`, `Channel`, `FR`). By default it opens an interactive viewer in your web browser, with dropdowns for group and organoid, hover tooltips identifying the source recording of each point, and a toolbar button that saves the current view as a high-resolution PNG. The viewer is a single self-contained HTML file; it loads the Plotly.js charting library from the internet the first time it runs on a machine. Static figures can also be rendered directly to a file.
 
 ```
-python3 fr_boxplots.py NeuronalActivity_NodeLevel.csv          # interactive viewer
+python3 fr_boxplots.py NeuronalActivity_NodeLevel.csv          # interactive viewer (opens in browser)
 python3 fr_boxplots.py data.csv --list                         # list groups/organoids/slices
-python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o bctl_ct7.png   # save a figure
+python3 fr_boxplots.py data.csv -o viewer.html                 # write the interactive viewer to a file to share
+python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o bctl_ct7.png   # save a static figure
 ```
 
 ### `grp_filter.py`
@@ -56,7 +57,7 @@ R scripts run with any current R installation: `Rscript assess_normality.R ...`.
 
 ### Instructions (General)
 
-1. Install [Python](https://www.python.org/downloads/) (3.10 or later). Python.org builds include `tkinter`, which the `fr_boxplots.py` viewer requires.
+1. Install [Python](https://www.python.org/downloads/) (3.10 or later).
 2. Install [R](https://cran.r-project.org/) if you plan to run `assess_normality.R`.
 3. Download this repository: on this page, click **Code → Download ZIP**, then unzip it.
 4. Open Terminal (macOS) or Command Prompt (Windows) and navigate to the unzipped folder:
