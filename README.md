@@ -7,10 +7,13 @@ Utility scripts for post-processing output from [MEA-NAP](https://github.com/SAN
 ### `fr_boxplots.py`
 Plots per-channel firing rate distributions from a MEA-NAP node-level CSV (`FileName`, `Grp`, `Channel`, `FR`). By default it opens an interactive viewer in your web browser, with dropdowns for group and organoid, hover tooltips identifying the source recording of each point, and a toolbar button that saves the current view as a high-resolution PNG. The viewer is a single self-contained HTML file; it loads the Plotly.js charting library from the internet the first time it runs on a machine. Static figures can also be rendered directly to a file.
 
+Each stim type / condition in the file (e.g. `stim1`, `stim3`, `base`) is analysed as its own experiment, with its own boxes, organoids and slices computed from that condition's recordings alone. A CSV holding several conditions therefore produces several viewers/figures — one browser tab per condition, or one output file per condition when saving (`-o viewer.html` becomes `viewer_stim1.html`, `viewer_stim3.html`, ...). Use `--stim` to restrict the run to a single condition.
+
 ```
 python3 fr_boxplots.py NeuronalActivity_NodeLevel.csv          # interactive viewer (opens in browser)
-python3 fr_boxplots.py data.csv --list                         # list groups/organoids/slices
-python3 fr_boxplots.py data.csv -o viewer.html                 # write the interactive viewer to a file to share
+python3 fr_boxplots.py data.csv --list                         # list stims/groups/organoids/slices
+python3 fr_boxplots.py data.csv -o viewer.html                 # write the interactive viewer(s) to file(s) to share
+python3 fr_boxplots.py data.csv --stim stim1 -o viewer.html    # a single condition only
 python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o bctl_ct7.png   # save a static figure
 ```
 
