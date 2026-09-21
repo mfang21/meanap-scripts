@@ -427,8 +427,7 @@ def render_html(payload: dict, initial: dict) -> str:
 
 
 def winpath_to_wsl(path: Path) -> Path:
-    """Convert a Windows-style path (e.g. pasted from File Explorer, 'C:\\...') to its
-    WSL equivalent ('/mnt/c/...')."""
+    """Convert a Windows path to its WSL equivalent."""
     try:
         wsl_path = subprocess.check_output(["wslpath", "-u", str(path)], text=True)
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
