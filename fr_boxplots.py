@@ -426,11 +426,19 @@ def render_html(payload: dict, initial: dict) -> str:
 
 
 def open_viewer(records: list[Record], csv_path: Path, initial: dict) -> None:
+    import subprocess
+    chrome_path = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
+    
     html = render_html(build_payload(records, csv_path.name), initial)
     out = Path(tempfile.gettempdir()) / f"fr_boxplots_{csv_path.stem}.html"
     out.write_text(html, encoding="utf-8")
     print(f"Viewer written to '{out}'; opening it in your browser.")
-    webbrowser.open(out.as_uri())
+
+    try:
+        win_path = subprocess.check_output(["wslpath", "-w", str(out.resolve())])
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        webbrowser.open(out.as_uri())
 
 
 # --------------------------------------------------------------------------- #
