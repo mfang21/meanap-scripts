@@ -14,7 +14,7 @@ import fr_boxplots as fb
 
 def rec(filename, grp, channel, fr):
     organoid, slc = fb.parse_organoid(filename, grp)
-    return fb.Record(filename, grp, channel, fr, organoid, slc)
+    return fb.Record(filename, grp, channel, fr, organoid, slc, fb.parse_stim(filename))
 
 
 RECORDS = [
@@ -61,6 +61,68 @@ class ParseRunName(unittest.TestCase):
         self.assertIsNone(fb.find_run_name(RECORDS))
 
 
+MIXED_STIM = [
+    rec("R250929CT7A_DIV250_stim3", "CTL", 1, 3.0),
+    rec("R250929CT7A_DIV250_stim1", "CTL", 1, 1.0),
+    rec("R250929MO5A_DIV250_stim3", "MOS", 1, 3.5),
+    rec("R250929MO5A_DIV250_stim1", "MOS", 1, 1.5),
+]
+
+
+class ParseStim(unittest.TestCase):
+    def test_numbered_stim(self):
+        self.assertEqual(fb.parse_stim("R250929CT1A_DIV250_stim1"), "stim1")
+
+    def test_direction_stim(self):
+        self.assertEqual(fb.parse_stim("R250929CT1A_DIV250_stimLR"), "stimLR")
+
+    def test_base(self):
+        self.assertEqual(fb.parse_stim("R250929CT7A_DIV250_base"), "base")
+
+    def test_last_token_wins(self):
+        self.assertEqual(fb.parse_stim("R250929CT7A_DIV250_CAM_strpd"), "strpd")
+
+    def test_no_div_segment(self):
+        self.assertIsNone(fb.parse_stim("R250929CT7A_DIV250"))
+        self.assertIsNone(fb.parse_stim("nothing_here"))
+
+
+class SplitByStim(unittest.TestCase):
+    def test_buckets_in_natural_order(self):
+        buckets = fb.split_by_stim(MIXED_STIM)
+        self.assertEqual([s for s, _ in buckets], ["stim1", "stim3"])
+        for stim, recs in buckets:
+            self.assertTrue(all(r.stim == stim for r in recs))
+            self.assertEqual(len(recs), 2)
+
+    def test_single_condition_is_one_bucket(self):
+        buckets = fb.split_by_stim(RECORDS)
+        self.assertEqual(len(buckets), 1)
+        self.assertEqual(buckets[0], (None, RECORDS))
+
+    def test_unparseable_stim_sorts_last(self):
+        buckets = fb.split_by_stim(MIXED_STIM + RECORDS)
+        self.assertEqual([s for s, _ in buckets], ["stim1", "stim3", None])
+
+    def test_boxes_are_not_pooled_across_stims(self):
+        # Pooled, channel 1 of CTL would span 1.0 and 3.0; split, each box holds one.
+        by_stim = dict(fb.split_by_stim(MIXED_STIM))
+        self.assertEqual(fb.box_stats(by_stim["stim1"], "CTL")[1]["med"], 1.0)
+        self.assertEqual(fb.box_stats(by_stim["stim3"], "CTL")[1]["med"], 3.0)
+
+
+class StimPath(unittest.TestCase):
+    def test_inserts_stim_when_several(self):
+        self.assertEqual(fb.stim_path(Path("out/viewer.html"), "stim1", True),
+                         Path("out/viewer_stim1.html"))
+
+    def test_untouched_for_a_single_condition(self):
+        self.assertEqual(fb.stim_path(Path("out/viewer.html"), "base", False),
+                         Path("out/viewer.html"))
+        self.assertEqual(fb.stim_path(Path("out/viewer.html"), None, True),
+                         Path("out/viewer.html"))
+
+
 class BoxStats(unittest.TestCase):
     def test_matches_matplotlib_rule(self):
         stats = fb.box_stats(RECORDS, "BCTL")
@@ -91,6 +153,18 @@ class Payload(unittest.TestCase):
         payload = json.loads(json.dumps(fb.build_payload(records, "x.csv")))
         self.assertEqual(payload["runName"], "R250929_DIV250_base")
 
+    def test_stim_round_trips(self):
+        payload = json.loads(json.dumps(fb.build_payload(RECORDS, "x.csv")))
+        self.assertIsNone(payload["stim"])
+        payload = json.loads(json.dumps(fb.build_payload(MIXED_STIM, "x.csv", "stim1")))
+        self.assertEqual(payload["stim"], "stim1")
+
+    def test_run_name_names_the_bucket_s_own_stim(self):
+        # Pooled, find_run_name() would report whichever stim came first.
+        for stim, recs in fb.split_by_stim(MIXED_STIM):
+            payload = fb.build_payload(recs, "x.csv", stim)
+            self.assertEqual(payload["runName"], f"R250929_DIV250_{stim}")
+
 
 class RenderHtml(unittest.TestCase):
     def test_script_terminator_in_filename_is_escaped(self):
@@ -108,7 +182,26 @@ class RenderHtml(unittest.TestCase):
         self.assertNotIn("__INITIAL__", html)
 
 
+STIM_CSV = (
+    "FileName,Grp,Channel,FR\n"
+    "R250929CT7A_DIV250_stim1,CTL,1,0.5\n"
+    "R250929CT7A_DIV250_stim1,CTL,2,1.5\n"
+    "R250929CT7A_DIV250_stim3,CTL,1,3.5\n"
+    "R250929CT7A_DIV250_stim3,CTL,2,4.5\n"
+    "R250929MO1A_DIV250_stim1,MOS,1,2.0\n"
+    "R250929MO1A_DIV250_stim3,MOS,1,6.0\n"
+)
+
+
 class Cli(unittest.TestCase):
+    def run_cli(self, tmp, *args):
+        proc = subprocess.run(
+            [sys.executable, str(Path(fb.__file__)), *args],
+            capture_output=True, text=True, cwd=tmp,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        return proc
+
     def test_html_output_needs_no_grp(self):
         with tempfile.TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "data.csv"
@@ -119,13 +212,68 @@ class Cli(unittest.TestCase):
                 "R250929MO1A_DIV250,BMOS,1,2.0\n"
             )
             out = Path(tmp) / "viewer.html"
-            proc = subprocess.run(
-                [sys.executable, str(Path(fb.__file__)), str(csv_path), "-o", str(out)],
-                capture_output=True, text=True,
-            )
-            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.run_cli(tmp, str(csv_path), "-o", str(out))
             self.assertTrue(out.is_file())
             self.assertIn('id="payload"', out.read_text())
+
+    def test_single_stim_keeps_the_requested_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "base.csv"
+            csv_path.write_text(
+                "FileName,Grp,Channel,FR\n"
+                "R250929CT7A_DIV250_base,BCTL,1,0.5\n"
+                "R250929CT7A_DIV250_base,BCTL,2,1.5\n"
+            )
+            out = Path(tmp) / "viewer.html"
+            self.run_cli(tmp, str(csv_path), "-o", str(out))
+            self.assertTrue(out.is_file())
+            self.assertFalse((Path(tmp) / "viewer_base.html").exists())
+
+    def test_two_stims_write_two_viewers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "stim1_3.csv"
+            csv_path.write_text(STIM_CSV)
+            self.run_cli(tmp, str(csv_path), "-o", str(Path(tmp) / "viewer.html"))
+
+            self.assertFalse((Path(tmp) / "viewer.html").exists())
+            for stim, other in (("stim1", "stim3"), ("stim3", "stim1")):
+                out = Path(tmp) / f"viewer_{stim}.html"
+                self.assertTrue(out.is_file())
+                html = out.read_text()
+                self.assertIn(f"_{stim}", html)
+                self.assertNotIn(f"_{other}", html)
+
+    def test_stim_flag_narrows_to_one_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "stim1_3.csv"
+            csv_path.write_text(STIM_CSV)
+            out = Path(tmp) / "viewer.html"
+            self.run_cli(tmp, str(csv_path), "--stim", "stim1", "-o", str(out))
+
+            self.assertTrue(out.is_file())
+            self.assertFalse((Path(tmp) / "viewer_stim1.html").exists())
+            self.assertNotIn("_stim3", out.read_text())
+
+    def test_unknown_stim_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "stim1_3.csv"
+            csv_path.write_text(STIM_CSV)
+            proc = subprocess.run(
+                [sys.executable, str(Path(fb.__file__)), str(csv_path),
+                 "--stim", "stim9", "-o", str(Path(tmp) / "viewer.html")],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(proc.returncode, 0)
+            self.assertIn("stim1, stim3", proc.stderr)
+
+    def test_two_stims_write_two_static_figures(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = Path(tmp) / "stim1_3.csv"
+            csv_path.write_text(STIM_CSV)
+            self.run_cli(tmp, str(csv_path), "--grp", "all",
+                         "-o", str(Path(tmp) / "overview.png"))
+            self.assertTrue((Path(tmp) / "overview_stim1.png").is_file())
+            self.assertTrue((Path(tmp) / "overview_stim3.png").is_file())
 
 
 if __name__ == "__main__":

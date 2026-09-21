@@ -19,9 +19,23 @@ Organoid identity is parsed from the file name. The segment right after the
 group marker ("CT" for BCTL, "MO" for BMOS, "MT" for BMUT) is a number-letter
 pair, e.g. "R250929CT7A_DIV250" -> organoid "CT7", slice "CT7A".
 
+Stim types (conditions) are analysed separately
+-----------------------------------------------
+The token after "DIV<n>_" in the file name is the condition, e.g. "stim1",
+"stim3", "stimLR", "stimRL", "base". A single CSV usually holds two of them
+("_stim1" and "_stim3" recordings side by side, or "_stimLR" and "_stimRL"), and
+each is its own experiment: its boxes, organoids and slices are computed from its
+own recordings alone and never pooled with another condition's.
+
+So a CSV with two conditions produces two viewers (two browser tabs, or two
+files named viewer_stim1.html and viewer_stim3.html), each titled with its
+condition. A CSV with one condition produces one viewer at the path you asked
+for. Use --stim to work on a single condition, and --list to see what is in the
+file before splitting.
+
 Usage
 -----
-Interactive viewer (default) opens in the web browser:
+Interactive viewer (default) opens in the web browser, one tab per stim type:
     python3 fr_boxplots.py NeuronalActivity_NodeLevel.csv
 
     Two drop-downs select the group ("All groups" gives the channel overview)
@@ -38,11 +52,12 @@ Interactive viewer (default) opens in the web browser:
 Write the interactive viewer to a file (to share, or on a headless machine):
     python3 fr_boxplots.py data.csv -o viewer.html
     python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o viewer.html   # initial selection
+    python3 fr_boxplots.py stim1_3.csv --stim stim1 -o viewer.html             # one condition
 
-List what is in the file (groups -> organoids -> slices, with recording counts):
+List what is in the file (stims -> groups -> organoids -> slices, with counts):
     python3 fr_boxplots.py data.csv --list
 
-Save a static figure without opening anything:
+Save a static figure without opening anything (one per stim type):
     python3 fr_boxplots.py data.csv --grp all -o channel_overview.png
     python3 fr_boxplots.py data.csv --grp BCTL -o bctl_all.png
     python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o bctl_ct7.png
@@ -105,8 +120,9 @@ class Record:
     grp: str
     channel: int
     fr: float
-    organoid: str   # e.g. CT7
-    slice: str      # e.g. CT7A
+    organoid: str        # e.g. CT7
+    slice: str           # e.g. CT7A
+    stim: str | None     # condition token, e.g. stim1 / stimLR / base
 
 
 # --------------------------------------------------------------------------- #
@@ -125,18 +141,28 @@ def parse_organoid(filename: str, grp: str) -> tuple[str, str]:
     return f"{prefix}{number}", f"{prefix}{number}{letter}"
 
 
+def parse_stim(filename: str) -> str | None:
+    """Return the condition token after DIV<n>_ ("stim1", "stimLR", "base"), or None.
+
+    One CSV often holds several conditions (e.g. _stim1 and _stim3 recordings side
+    by side); this token is what split_by_stim() partitions on.
+    """
+    m = re.search(r"DIV\d+_(.+)$", filename)
+    return m.group(1).rsplit("_", 1)[-1] if m else None
+
+
 def parse_run_name(filename: str) -> str | None:
     """Return "R250929_DIV250_base" from ".../R250929CT7A_DIV250_base", or None."""
     run_m = re.match(r"(R\d+)", filename)
-    div_m = re.search(r"(DIV\d+)_(.+)$", filename)
-    if not run_m or not div_m:
+    div_m = re.search(r"(DIV\d+)_", filename)
+    stim = parse_stim(filename)
+    if not run_m or not div_m or not stim:
         return None
-    suffix = div_m.group(2).rsplit("_", 1)[-1]
-    return f"{run_m.group(1)}_{div_m.group(1)}_{suffix}"
+    return f"{run_m.group(1)}_{div_m.group(1)}_{stim}"
 
 
 def find_run_name(records: list[Record]) -> str | None:
-    """First parseable run name across the file's records (all rows share one run)."""
+    """First parseable run name across the records (one stim bucket shares one run)."""
     for r in records:
         name = parse_run_name(r.filename)
         if name:
@@ -184,7 +210,8 @@ def load_records(csv_path: Path) -> list[Record]:
         organoid, slc = parse_organoid(filename, grp)
         if organoid == UNKNOWN:
             unknown_files.add(filename)
-        records.append(Record(filename, grp, channel, fr, organoid, slc))
+        records.append(Record(filename, grp, channel, fr, organoid, slc,
+                              parse_stim(filename)))
 
     if skipped_fr:
         print(f"Note: skipped {skipped_fr} row(s) with missing/non-numeric FR.", file=sys.stderr)
@@ -216,6 +243,26 @@ def organoids(records: list[Record], grp: str) -> list[str]:
     return sorted({r.organoid for r in records if r.grp == grp}, key=_natural_key)
 
 
+def stims(records: list[Record]) -> list[str | None]:
+    """Condition tokens present, in natural order; an unparseable one sorts last."""
+    found = {r.stim for r in records}
+    named = sorted((s for s in found if s), key=_natural_key)
+    return named + ([None] if None in found else [])
+
+
+def split_by_stim(records: list[Record]) -> list[tuple[str | None, list[Record]]]:
+    """Records bucketed by condition token, in natural order (unparseable last).
+
+    Each stim type is its own experiment, so its boxes, organoids and slices are
+    computed from its bucket alone. A file with one condition yields one bucket,
+    which is the single-viewer behaviour.
+    """
+    by_stim: dict[str | None, list[Record]] = defaultdict(list)
+    for r in records:
+        by_stim[r.stim].append(r)
+    return [(s, by_stim[s]) for s in stims(records)]
+
+
 def select(records: list[Record], grp: str, organoid: str | None) -> list[Record]:
     """Records used for the *points*: the group, narrowed to one organoid if given."""
     sel = records if grp == ALL_GROUPS else [r for r in records if r.grp == grp]
@@ -243,16 +290,28 @@ def box_stats(records: list[Record], grp: str) -> dict[int, dict[str, float]]:
     return stats
 
 
-def describe(records: list[Record]) -> None:
+def _describe_one(records: list[Record], indent: str = "") -> None:
     for grp in groups(records):
         in_grp = [r for r in records if r.grp == grp]
-        print(f"{grp}: {len({r.filename for r in in_grp})} recordings, "
+        print(f"{indent}{grp}: {len({r.filename for r in in_grp})} recordings, "
               f"{len({r.channel for r in in_grp})} channels")
         for org in organoids(in_grp, grp):
             in_org = [r for r in in_grp if r.organoid == org]
             slices = sorted({r.slice for r in in_org}, key=_natural_key)
-            print(f"  {org}: {len({r.filename for r in in_org})} recordings; "
+            print(f"{indent}  {org}: {len({r.filename for r in in_org})} recordings; "
                   f"slices: {', '.join(slices)}")
+
+
+def describe(records: list[Record]) -> None:
+    """Print groups -> organoids -> slices, under a stim heading when the file
+    holds more than one condition (each of those becomes its own viewer)."""
+    buckets = split_by_stim(records)
+    if len(buckets) == 1:
+        _describe_one(records)
+        return
+    for stim, recs in buckets:
+        print(f"{stim or UNKNOWN} stim:")
+        _describe_one(recs, indent="  ")
 
 
 # --------------------------------------------------------------------------- #
@@ -311,21 +370,25 @@ def _draw_outliers(ax, recs: list[Record], stats: dict[int, dict[str, float]],
 
 
 def draw(ax, records: list[Record], grp: str, organoid: str | None,
-         show_points: bool = True) -> None:
+         show_points: bool = True, stim: str | None = None) -> None:
     """Draw per-channel FR box plots for the selection onto `ax`.
 
-    Boxes always summarise the whole group (`grp`), or the whole file when
+    Boxes always summarise the whole group (`grp`), or all of `records` when
     `grp` is ALL_GROUPS. Selecting an organoid only changes which readings are
     overlaid as points (that organoid's, coloured by slice).
+
+    `records` is expected to hold one condition; `stim` names it in the title so
+    a saved figure says which one it is.
     """
     ax.clear()
     ax.set_axis_on()
     at_organoid_level = bool(organoid) and organoid != ALL_ORGANOIDS
+    stim_suffix = f" — {stim}" if stim else ""
 
     boxes = box_records(records, grp)
     points = select(records, grp, organoid)
     if not boxes:
-        ax.set_title(f"Firing rate per channel: {grp}")
+        ax.set_title(f"Firing rate per channel: {grp}{stim_suffix}")
         ax.text(0.5, 0.5, "No data for this selection", ha="center", va="center",
                 transform=ax.transAxes, color=BOX_COLOR)
         ax.set_axis_off()
@@ -347,7 +410,7 @@ def draw(ax, records: list[Record], grp: str, organoid: str | None,
     if grp == ALL_GROUPS:
         _draw_boxes(ax, by_channel, channels, positions)
         _draw_outliers(ax, boxes, stats, pos_of)
-        ax.set_title(f"Firing rate per channel: all groups   ({n_label})",
+        ax.set_title(f"Firing rate per channel: all groups{stim_suffix}   ({n_label})",
                      fontsize=11, loc="left", color="#0b0b0b")
         _style_axes(ax, channels, positions)
         return
@@ -390,7 +453,7 @@ def draw(ax, records: list[Record], grp: str, organoid: str | None,
         title = f"Firing rate per channel: {grp} boxes, {organoid} readings highlighted"
     else:
         title = f"Firing rate per channel: {grp}"
-    ax.set_title(f"{title}   ({n_label})", fontsize=11, loc="left", color="#0b0b0b")
+    ax.set_title(f"{title}{stim_suffix}   ({n_label})", fontsize=11, loc="left", color="#0b0b0b")
     _style_axes(ax, channels, positions)
 
 
@@ -410,10 +473,11 @@ def figure_size(records: list[Record], grp: str, organoid: str | None) -> tuple[
 VIEWER_HTML_PATH = Path(__file__).with_name("fr_boxplots_viewer.html")
 
 
-def build_payload(records: list[Record], csv_name: str) -> dict:
+def build_payload(records: list[Record], csv_name: str, stim: str | None = None) -> dict:
     grps = groups(records)
     return {
         "csv": csv_name,
+        "stim": stim,
         "runName": find_run_name(records),
         "groups": [ALL_GROUPS] + grps,
         "organoids": {g: organoids(records, g) for g in grps},
@@ -456,20 +520,34 @@ def winpath_to_wsl(path: Path) -> Path:
     return Path(wsl_path.strip())
 
 
-def open_viewer(records: list[Record], csv_path: Path, initial: dict) -> None:
+def stim_path(path: Path, stim: str | None, multi: bool) -> Path:
+    """out/viewer.html -> out/viewer_stim1.html when several stims share one CSV."""
+    if not multi or not stim:
+        return path
+    return path.with_name(f"{path.stem}_{stim}{path.suffix}")
+
+
+def _open_in_browser(out: Path) -> None:
     chrome_path = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
-
-    html = render_html(build_payload(records, csv_path.name), initial)
-    out = Path(tempfile.gettempdir()) / f"fr_boxplots_{csv_path.stem}.html"
-    out.write_text(html, encoding="utf-8")
-    print(f"Viewer written to '{out}'; opening it in your browser.")
-
     try:
         win_path = subprocess.check_output(["wslpath", "-w", str(out.resolve())])
         subprocess.run([chrome_path, win_path], check=True)
-
     except (subprocess.CalledProcessError, FileNotFoundError):
         webbrowser.open(out.as_uri())
+
+
+def open_viewer(records: list[Record], csv_path: Path, initial: dict) -> None:
+    """Write and open one viewer per condition found in `records`."""
+    buckets = split_by_stim(records)
+    multi = len(buckets) > 1
+    base = Path(tempfile.gettempdir()) / f"fr_boxplots_{csv_path.stem}.html"
+
+    for stim, recs in buckets:
+        html = render_html(build_payload(recs, csv_path.name, stim), initial)
+        out = stim_path(base, stim, multi)
+        out.write_text(html, encoding="utf-8")
+        print(f"Viewer written to '{out}'; opening it in your browser.")
+        _open_in_browser(out)
 
 
 # --------------------------------------------------------------------------- #
@@ -491,6 +569,9 @@ def parse_args():
                                       "initial selection of a saved viewer.")
     parser.add_argument("--organoid", help="Organoid whose readings to highlight on the group's boxes "
                                            "(e.g. CT7). Default: all organoids.")
+    parser.add_argument("--stim", help="Analyse only this stim type / condition (e.g. stim1, stimLR). "
+                                       "Default: every condition in the file, each in its own viewer "
+                                       "or figure.")
     parser.add_argument("-o", "--output", type=Path,
                         help="Write to this path instead of opening the viewer: .html saves the "
                              "interactive viewer, png/pdf/svg a static figure.")
@@ -510,6 +591,13 @@ def main():
     if not args.input_csv.is_file():
         sys.exit(f"Error: input file '{args.input_csv}' does not exist.")
     records = load_records(args.input_csv)
+
+    if args.stim is not None:
+        available = [s for s in stims(records) if s]
+        if args.stim not in available:
+            sys.exit(f"Error: stim type '{args.stim}' not found. "
+                     f"Available: {', '.join(available) or 'none'}")
+        records = [r for r in records if r.stim == args.stim]
 
     if args.list:
         describe(records)
@@ -538,12 +626,19 @@ def main():
         sys.exit("Error: --grp/--organoid without -o has nothing to do; add -o OUTPUT to save a figure "
                  "or omit them to open the interactive viewer.")
 
+    # Each condition is analysed on its own; several of them mean several files,
+    # named after the -o path (viewer.html -> viewer_stim1.html, viewer_stim3.html).
+    buckets = split_by_stim(records)
+    multi = len(buckets) > 1
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+
     if args.output.suffix.lower() in (".html", ".htm"):
-        html = render_html(build_payload(records, args.input_csv.name),
-                           initial_state(args.grp, args.organoid, not args.no_points, args.dpi))
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(html, encoding="utf-8")
-        print(f"Saved '{args.output}'.")
+        initial = initial_state(args.grp, args.organoid, not args.no_points, args.dpi)
+        for stim, recs in buckets:
+            html = render_html(build_payload(recs, args.input_csv.name, stim), initial)
+            out = stim_path(args.output, stim, multi)
+            out.write_text(html, encoding="utf-8")
+            print(f"Saved '{out}'.")
         return
     if args.grp is None:
         sys.exit("Error: --grp is required to save a static figure "
@@ -553,13 +648,14 @@ def main():
     matplotlib.use("Agg")
     from matplotlib.figure import Figure
 
-    fig = Figure(figsize=figure_size(records, args.grp, args.organoid))
-    ax = fig.add_subplot(111)
-    draw(ax, records, args.grp, args.organoid, show_points=not args.no_points)
-    fig.tight_layout()
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.output, dpi=args.dpi, bbox_inches="tight")
-    print(f"Saved '{args.output}'.")
+    for stim, recs in buckets:
+        fig = Figure(figsize=figure_size(recs, args.grp, args.organoid))
+        ax = fig.add_subplot(111)
+        draw(ax, recs, args.grp, args.organoid, show_points=not args.no_points, stim=stim)
+        fig.tight_layout()
+        out = stim_path(args.output, stim, multi)
+        fig.savefig(out, dpi=args.dpi, bbox_inches="tight")
+        print(f"Saved '{out}'.")
 
 
 if __name__ == "__main__":

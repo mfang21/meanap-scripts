@@ -59,7 +59,11 @@
   const HOVER = "%{customdata[0]} · %{customdata[1]}<br>Channel %{customdata[2]}"
               + "<br>FR = %{customdata[3]:.4~g} Hz<br>%{customdata[4]}<extra></extra>";
 
-  document.title = "Firing rate per channel: " + payload.csv;
+  // One viewer holds one stim type / condition; it is named in every title so
+  // the two viewers built from a mixed CSV can never be mistaken for each other.
+  const stimSuffix = payload.stim ? " — " + payload.stim : "";
+
+  document.title = "Firing rate per channel: " + payload.csv + stimSuffix;
   if (payload.runName) {
     const runTitleEl = document.getElementById("runTitle");
     runTitleEl.textContent = "Run: " + payload.runName;
@@ -153,9 +157,9 @@
     }
 
     const nLabel = `n = ${nFiles} recording${nFiles === 1 ? "" : "s"}`;
-    const title = grp === allGroups ? "Firing rate per channel: all groups"
+    const title = (grp === allGroups ? "Firing rate per channel: all groups"
       : atOrganoid ? `Firing rate per channel: ${grp} boxes, ${org} readings highlighted`
-      : `Firing rate per channel: ${grp}`;
+      : `Firing rate per channel: ${grp}`) + stimSuffix;
     const crowded = channels.length > 30;
     const axisLine = { showline: true, linecolor: C.grid, zeroline: false, ticks: "outside", tickcolor: C.grid };
 
@@ -178,7 +182,8 @@
       responsive: true, displaylogo: false, modeBarButtonsToRemove: ["select2d", "lasso2d"],
       toImageButtonOptions: {
         format: "png", scale: initial.scale,
-        filename: `fr_${grp}_${atOrganoid ? org : "all"}`.replace(/[^\w-]+/g, "_"),
+        filename: `fr_${payload.stim ? payload.stim + "_" : ""}${grp}_${atOrganoid ? org : "all"}`
+          .replace(/[^\w-]+/g, "_"),
       },
     };
     Plotly.react("plot", traces, layout, config);
