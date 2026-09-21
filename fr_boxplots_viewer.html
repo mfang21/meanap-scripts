@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firing rate per channel</title>
+<style>
+  :root { --ink: #0b0b0b; --muted: #52514e; --line: #e4e3df; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink); background: #fff; display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+  }
+  header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  select { font: inherit; padding: 3px 6px; }
+  #status { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  #plot { flex: 1; min-height: 320px; }
+  #banner {
+    margin: 16px; padding: 12px 16px; border: 1px solid #e34948; border-radius: 6px;
+    background: #fff5f5; color: #8a1f1f;
+  }
+</style>
+</head>
+<body>
+<header>
+  <label>Group <select id="grp"></select></label>
+  <label>Organoid <select id="org"></select></label>
+  <label><input type="checkbox" id="points"> Show individual readings</label>
+  <span id="status"></span>
+</header>
+<div id="banner" hidden>
+  Could not load the Plotly.js charting library from cdn.plot.ly. This viewer needs an
+  internet connection the first time it runs on a machine; reconnect and reload the page.
+</div>
+<div id="plot"></div>
+<script type="application/json" id="payload">__PAYLOAD__</script>
+<script type="application/json" id="initial">__INITIAL__</script>
+<script src="__PLOTLY_JS_URL__" onerror="document.getElementById('banner').hidden = false"></script>
+<script>
+(function () {
+  if (typeof Plotly === "undefined") {
+    document.getElementById("banner").hidden = false;
+    return;
+  }
+  const payload = JSON.parse(document.getElementById("payload").textContent);
+  const initial = JSON.parse(document.getElementById("initial").textContent);
+  const { allGroups, allOrganoids } = payload.labels;
+  const C = payload.colors;
+  const grpSel = document.getElementById("grp");
+  const orgSel = document.getElementById("org");
+  const pointsBox = document.getElementById("points");
+  const status = document.getElementById("status");
+  const HOVER = "%{customdata[0]} · %{customdata[1]}<br>Channel %{customdata[2]}"
+              + "<br>FR = %{customdata[3]:.4~g} Hz<br>%{customdata[4]}<extra></extra>";
+
+  document.title = "Firing rate per channel: " + payload.csv;
+
+  function fill(sel, values, current) {
+    sel.innerHTML = "";
+    for (const v of values) {
+      const o = document.createElement("option");
+      o.value = o.textContent = v;
+      sel.appendChild(o);
+    }
+    sel.value = values.includes(current) ? current : values[0];
+  }
+
+  function naturalKey(s) {
+    return s.split(/(\d+)/).map(t => (/^\d+$/.test(t) ? Number(t) : t.toLowerCase()));
+  }
+  function naturalCompare(a, b) {
+    const ka = naturalKey(a), kb = naturalKey(b);
+    for (let i = 0; i < Math.min(ka.length, kb.length); i++) {
+      if (ka[i] === kb[i]) continue;
+      if (typeof ka[i] !== typeof kb[i]) return String(ka[i]) < String(kb[i]) ? -1 : 1;
+      return ka[i] < kb[i] ? -1 : 1;
+    }
+    return ka.length - kb.length;
+  }
+
+  // Seeded so that two exports of the same selection place the dots identically.
+  function rng(seed) {
+    let s = seed >>> 0;
+    return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  function render() {
+    const grp = grpSel.value, org = orgSel.value, showPoints = pointsBox.checked;
+    const atOrganoid = grp !== allGroups && org !== allOrganoids;
+    const stats = payload.stats[grp];
+    const channels = Object.keys(stats).map(Number).sort((a, b) => a - b);
+    const pos = new Map(channels.map((c, i) => [c, i]));
+    const boxes = payload.records.filter(r => grp === allGroups || r.g === grp);
+    const points = atOrganoid ? boxes.filter(r => r.o === org) : boxes;
+    const nFiles = new Set(boxes.map(r => r.f)).size;
+
+    // One box trace per channel so that hovering a box names the channel.
+    // Positions are 0..n-1 on a linear axis labelled with the channel numbers,
+    // which leaves the jittered points free to sit at fractional x.
+    const traces = channels.map(c => ({
+      type: "box", name: `Channel ${c}`, x: [pos.get(c)],
+      q1: [stats[c].q1], median: [stats[c].med], q3: [stats[c].q3],
+      lowerfence: [stats[c].whislo], upperfence: [stats[c].whishi],
+      width: 0.55, line: { color: C.box, width: 1 }, fillcolor: "rgba(0,0,0,0)",
+      boxpoints: false, showlegend: false,
+    }));
+
+    let legendTitle = "";
+    if (showPoints && grp !== allGroups) {
+      // Coloured by organoid for the whole group, by slice for one organoid.
+      // Series beyond the palette fold into "Other".
+      const key = atOrganoid ? (r => r.s) : (r => r.o);
+      const series = [...new Set(points.map(key))].sort(naturalCompare);
+      const named = series.length > payload.maxSeries ? series.slice(0, payload.maxSeries - 1) : series;
+      const colorOf = new Map(named.map((s, i) => [s, C.palette[i]]));
+      const rand = rng(0);
+      let otherShown = false;
+      for (const s of series) {
+        const pts = points.filter(r => key(r) === s);
+        const isOther = !colorOf.has(s);
+        traces.push({
+          type: "scatter", mode: "markers",
+          name: isOther ? "Other" : s, legendgroup: isOther ? "Other" : s,
+          showlegend: !(isOther && otherShown),
+          x: pts.map(r => pos.get(r.c) + (rand() * 0.36 - 0.18)), y: pts.map(r => r.fr),
+          marker: { size: 6, color: isOther ? C.other : colorOf.get(s), opacity: 0.75 },
+          customdata: pts.map(r => [r.g, r.s, r.c, r.fr, r.f]), hovertemplate: HOVER,
+        });
+        if (isOther) otherShown = true;
+      }
+      legendTitle = atOrganoid ? "Slice" : "Organoid";
+    } else {
+      const outs = boxes.filter(r => !(stats[r.c].whislo <= r.fr && r.fr <= stats[r.c].whishi));
+      if (outs.length) {
+        traces.push({
+          type: "scatter", mode: "markers", name: "Outlier", showlegend: false,
+          x: outs.map(r => pos.get(r.c)), y: outs.map(r => r.fr),
+          marker: { size: 5, color: C.box, opacity: 0.6 },
+          customdata: outs.map(r => [r.g, r.s, r.c, r.fr, r.f]), hovertemplate: HOVER,
+        });
+      }
+    }
+
+    const nLabel = `n = ${nFiles} recording${nFiles === 1 ? "" : "s"}`;
+    const title = grp === allGroups ? "Firing rate per channel: all groups"
+      : atOrganoid ? `Firing rate per channel: ${grp} boxes, ${org} readings highlighted`
+      : `Firing rate per channel: ${grp}`;
+    const crowded = channels.length > 30;
+    const axisLine = { showline: true, linecolor: C.grid, zeroline: false, ticks: "outside", tickcolor: C.grid };
+
+    const layout = {
+      title: { text: `${title}   (${nLabel})`, x: 0, xanchor: "left", font: { size: 15, color: "#0b0b0b" } },
+      xaxis: {
+        title: { text: "Channel" }, tickmode: "array",
+        tickvals: channels.map(c => pos.get(c)), ticktext: channels.map(String),
+        range: [-0.7, channels.length - 0.3], tickangle: crowded ? -90 : 0,
+        tickfont: { size: 10 }, showgrid: false, ...axisLine,
+      },
+      yaxis: { title: { text: "Firing rate (Hz)" }, gridcolor: C.grid, ...axisLine },
+      legend: { title: { text: legendTitle }, x: 1.01, y: 1, xanchor: "left", font: { size: 11 } },
+      showlegend: legendTitle !== "",
+      margin: { l: 60, r: 150, t: 60, b: crowded ? 70 : 50 },
+      hovermode: "closest", paper_bgcolor: "#fff", plot_bgcolor: "#fff",
+      font: { family: "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif", color: "#52514e" },
+    };
+    const config = {
+      responsive: true, displaylogo: false, modeBarButtonsToRemove: ["select2d", "lasso2d"],
+      toImageButtonOptions: {
+        format: "png", scale: initial.scale,
+        filename: `fr_${grp}_${atOrganoid ? org : "all"}`.replace(/[^\w-]+/g, "_"),
+      },
+    };
+    Plotly.react("plot", traces, layout, config);
+
+    let msg = `boxes: ${nFiles} recordings, ${channels.length} channels`;
+    if (atOrganoid) {
+      msg += `   |   ${org}: ${new Set(points.map(r => r.f)).size} recordings, ${points.length} readings`;
+    }
+    status.textContent = msg;
+  }
+
+  function setGroup(org) {
+    const grp = grpSel.value;
+    const orgs = grp === allGroups ? [allOrganoids] : [allOrganoids, ...payload.organoids[grp]];
+    fill(orgSel, orgs, org);
+    orgSel.disabled = grp === allGroups;
+    render();
+  }
+
+  fill(grpSel, payload.groups, initial.grp);
+  pointsBox.checked = initial.showPoints;
+  grpSel.addEventListener("change", () => setGroup(allOrganoids));
+  orgSel.addEventListener("change", render);
+  pointsBox.addEventListener("change", render);
+  setGroup(initial.organoid);
+})();
+</script>
+</body>
+</html>
