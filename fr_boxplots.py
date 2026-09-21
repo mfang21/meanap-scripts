@@ -58,6 +58,7 @@ import json
 import math
 import random
 import re
+import subprocess
 import sys
 import tempfile
 import webbrowser
@@ -445,12 +446,30 @@ def render_html(payload: dict, initial: dict) -> str:
             .replace("__INITIAL__", _json_for_html(initial)))
 
 
+def winpath_to_wsl(path: Path) -> Path:
+    """Convert a Windows path to its WSL equivalent."""
+    try:
+        wsl_path = subprocess.check_output(["wslpath", "-u", str(path)], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        sys.exit(f"Error: could not convert Windows path '{path}' to a WSL path "
+                 f"(is this running under WSL?): {e}")
+    return Path(wsl_path.strip())
+
+
 def open_viewer(records: list[Record], csv_path: Path, initial: dict) -> None:
+    chrome_path = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
+
     html = render_html(build_payload(records, csv_path.name), initial)
     out = Path(tempfile.gettempdir()) / f"fr_boxplots_{csv_path.stem}.html"
     out.write_text(html, encoding="utf-8")
     print(f"Viewer written to '{out}'; opening it in your browser.")
-    webbrowser.open(out.as_uri())
+
+    try:
+        win_path = subprocess.check_output(["wslpath", "-w", str(out.resolve())])
+        subprocess.run([chrome_path, win_path], check=True)
+
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        webbrowser.open(out.as_uri())
 
 
 # --------------------------------------------------------------------------- #
@@ -461,6 +480,10 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input_csv", type=Path, help="CSV with FileName, grp, Channel and FR columns.")
+    parser.add_argument("--winpath", action="store_true",
+                        help="Treat input_csv (and -o/--output, if given) as Windows paths, e.g. "
+                             "'C:\\Users\\...' as pasted from File Explorer, and convert them to "
+                             "their WSL equivalent ('/mnt/c/Users/...'). Requires running under WSL.")
     parser.add_argument("--list", action="store_true",
                         help="Print groups, organoids and slices found in the file, then exit.")
     parser.add_argument("--grp", help="Group to plot (e.g. BCTL), or 'all' for the channel overview "
@@ -480,6 +503,10 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.winpath:
+        args.input_csv = winpath_to_wsl(args.input_csv)
+        if args.output is not None:
+            args.output = winpath_to_wsl(args.output)
     if not args.input_csv.is_file():
         sys.exit(f"Error: input file '{args.input_csv}' does not exist.")
     records = load_records(args.input_csv)
