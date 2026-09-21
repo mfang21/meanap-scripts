@@ -16,6 +16,7 @@
     padding: 10px 16px; border-bottom: 1px solid var(--line);
   }
   header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .run-title { flex: 1 0 100%; font-size: 15px; font-weight: 600; color: var(--ink); }
   select { font: inherit; padding: 3px 6px; }
   #status { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
   #plot { flex: 1; min-height: 320px; }
@@ -27,6 +28,7 @@
 </head>
 <body>
 <header>
+  <div id="runTitle" class="run-title" hidden></div>
   <label>Group <select id="grp"></select></label>
   <label>Organoid <select id="org"></select></label>
   <label><input type="checkbox" id="points"> Show individual readings</label>
@@ -58,6 +60,11 @@
               + "<br>FR = %{customdata[3]:.4~g} Hz<br>%{customdata[4]}<extra></extra>";
 
   document.title = "Firing rate per channel: " + payload.csv;
+  if (payload.runName) {
+    const runTitleEl = document.getElementById("runTitle");
+    runTitleEl.textContent = "Run: " + payload.runName;
+    runTitleEl.hidden = false;
+  }
 
   function fill(sel, values, current) {
     sel.innerHTML = "";

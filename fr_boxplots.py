@@ -124,6 +124,25 @@ def parse_organoid(filename: str, grp: str) -> tuple[str, str]:
     return f"{prefix}{number}", f"{prefix}{number}{letter}"
 
 
+def parse_run_name(filename: str) -> str | None:
+    """Return "R250929_DIV250_base" from ".../R250929CT7A_DIV250_base", or None."""
+    run_m = re.match(r"(R\d+)", filename)
+    div_m = re.search(r"(DIV\d+)_(.+)$", filename)
+    if not run_m or not div_m:
+        return None
+    suffix = div_m.group(2).rsplit("_", 1)[-1]
+    return f"{run_m.group(1)}_{div_m.group(1)}_{suffix}"
+
+
+def find_run_name(records: list[Record]) -> str | None:
+    """First parseable run name across the file's records (all rows share one run)."""
+    for r in records:
+        name = parse_run_name(r.filename)
+        if name:
+            return name
+    return None
+
+
 def _find_columns(fieldnames: list[str]) -> dict[str, str]:
     """Map the canonical names to the actual header spellings (case-insensitive)."""
     lookup = {name.strip().lstrip("﻿").lower(): name for name in fieldnames}
@@ -394,6 +413,7 @@ def build_payload(records: list[Record], csv_name: str) -> dict:
     grps = groups(records)
     return {
         "csv": csv_name,
+        "runName": find_run_name(records),
         "groups": [ALL_GROUPS] + grps,
         "organoids": {g: organoids(records, g) for g in grps},
         "stats": {g: box_stats(records, g) for g in [ALL_GROUPS] + grps},

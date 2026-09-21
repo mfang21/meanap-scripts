@@ -43,6 +43,24 @@ class ParseOrganoid(unittest.TestCase):
         self.assertEqual(fb.parse_organoid("nothing_here", "BCTL"), (fb.UNKNOWN, fb.UNKNOWN))
 
 
+class ParseRunName(unittest.TestCase):
+    def test_run_div_and_suffix(self):
+        self.assertEqual(fb.parse_run_name("R250929CT7A_DIV250_base"), "R250929_DIV250_base")
+
+    def test_no_trailing_suffix_after_div(self):
+        self.assertIsNone(fb.parse_run_name("R250929CT7A_DIV250"))
+
+    def test_no_match(self):
+        self.assertIsNone(fb.parse_run_name("nothing_here"))
+
+    def test_find_run_name_uses_first_parseable_record(self):
+        records = RECORDS + [rec("R250929CT2A_DIV250_treatment", "BCTL", 1, 0.4)]
+        self.assertEqual(fb.find_run_name(records), "R250929_DIV250_treatment")
+
+    def test_find_run_name_none_when_nothing_parses(self):
+        self.assertIsNone(fb.find_run_name(RECORDS))
+
+
 class BoxStats(unittest.TestCase):
     def test_matches_matplotlib_rule(self):
         stats = fb.box_stats(RECORDS, "BCTL")
@@ -66,6 +84,12 @@ class Payload(unittest.TestCase):
         self.assertEqual(set(payload["stats"]), {fb.ALL_GROUPS, "BCTL", "BMOS"})
         self.assertEqual(len(payload["records"]), len(RECORDS))
         self.assertEqual(payload["colors"]["palette"], fb.PALETTE)
+        self.assertIsNone(payload["runName"])
+
+    def test_run_name_present_when_parseable(self):
+        records = RECORDS + [rec("R250929CT7A_DIV250_base", "BCTL", 1, 0.5)]
+        payload = json.loads(json.dumps(fb.build_payload(records, "x.csv")))
+        self.assertEqual(payload["runName"], "R250929_DIV250_base")
 
 
 class RenderHtml(unittest.TestCase):
