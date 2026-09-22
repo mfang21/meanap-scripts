@@ -154,6 +154,48 @@ class CheckRuns(unittest.TestCase):
         self.assertNotIn("merged unchecked", err.getvalue())
 
 
+class CheckDuplicates(unittest.TestCase):
+    def test_disjoint_files_pass(self):
+        tables = [table("base.csv", BASE_CSV), table("stim1.csv", STIM1_CSV),
+                  table("stim3.csv", STIM3_CSV)]
+        self.assertIsNone(mc.check_duplicates(tables))
+
+    def test_a_name_repeating_within_one_file_is_expected(self):
+        # BASE_CSV lists R250929CT7A_DIV250_base twice, once per channel.
+        self.assertIsNone(mc.check_duplicates([table("base.csv", BASE_CSV)]))
+
+    def test_the_same_file_twice_is_rejected(self):
+        tables = [table("base.csv", BASE_CSV), table("copy.csv", BASE_CSV)]
+        with self.assertRaises(SystemExit) as cm:
+            mc.check_duplicates(tables)
+        message = str(cm.exception)
+        self.assertIn("appears in more than one input file", message)
+        self.assertIn("share 2 recording(s)", message)
+        self.assertIn("R250929CT7A_DIV250_base", message)
+        self.assertIn("R250929MO1A_DIV250_base", message)
+
+    def test_a_single_overlapping_recording_is_rejected(self):
+        overlap = STIM1_CSV + "R250929CT7A_DIV250_base,BCTL,9,9.0\n"
+        with self.assertRaises(SystemExit) as cm:
+            mc.check_duplicates([table("base.csv", BASE_CSV), table("stim1.csv", overlap)])
+        message = str(cm.exception)
+        self.assertIn("'base.csv' and 'stim1.csv' share 1 recording(s)", message)
+        self.assertIn("R250929CT7A_DIV250_base", message)
+        self.assertNotIn("R250929MO1A", message)
+
+    def test_overlap_between_non_adjacent_files_is_found(self):
+        overlap = STIM3_CSV + "R250929MO1A_DIV250_base,BMOS,1,9.0\n"
+        with self.assertRaises(SystemExit) as cm:
+            mc.check_duplicates([table("base.csv", BASE_CSV), table("stim1.csv", STIM1_CSV),
+                                 table("stim3.csv", overlap)])
+        self.assertIn("'base.csv' and 'stim3.csv'", str(cm.exception))
+
+    def test_blank_file_names_are_not_treated_as_a_repeat(self):
+        blank = STIM1_CSV + ",BCTL,9,9.0\n"
+        self.assertIsNone(mc.check_duplicates(
+            [table("base.csv", BASE_CSV + ",BCTL,9,9.0\n"), table("stim1.csv", blank)]))
+
+
 class ResolveOutputPath(unittest.TestCase):
     def test_default_name_beside_the_first_input(self):
         inputs = [Path("/data/run/base.csv"), Path("/data/run/stim1.csv")]
@@ -242,6 +284,20 @@ class Cli(unittest.TestCase):
                                 stim1=STIM1_CSV.replace("R250929", "R250930"))
             proc = self.run_cli(tmp, *map(str, paths), expect_ok=False)
             self.assertIn("not from the same run", proc.stderr)
+            self.assertFalse((Path(tmp) / mc.DEFAULT_NAME).exists())
+
+    def test_the_same_path_twice_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_files(tmp, base=BASE_CSV, stim1=STIM1_CSV)
+            proc = self.run_cli(tmp, *map(str, paths), str(paths[0]), expect_ok=False)
+            self.assertIn("given more than once", proc.stderr)
+            self.assertFalse((Path(tmp) / mc.DEFAULT_NAME).exists())
+
+    def test_two_copies_under_different_names_write_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_files(tmp, base=BASE_CSV, copy=BASE_CSV)
+            proc = self.run_cli(tmp, *map(str, paths), expect_ok=False)
+            self.assertIn("appears in more than one input file", proc.stderr)
             self.assertFalse((Path(tmp) / mc.DEFAULT_NAME).exists())
 
     def test_empty_input_is_rejected(self):

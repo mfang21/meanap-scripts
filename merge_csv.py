@@ -3,7 +3,7 @@
 
 Written for combining the per-condition node-level exports of one run
 
-Any number of CSVs can be given. Nothing is written until two checks pass:
+Any number of CSVs can be given. Nothing is written until three checks pass:
 
     Columns   Every file must carry the same set of columns, compared without
               regard to case or order. The merged file uses the first file's
@@ -13,6 +13,11 @@ Any number of CSVs can be given. Nothing is written until two checks pass:
               by the leading R<digits> token of its FileName, e.g. "R250929" in
               "R250929CT7A_DIV250_stim1". A file holding two runs, or a file
               from a different run than the others, stops the merge.
+
+    Repeats   No recording may appear in more than one file. A FileName repeats
+              within a file once per channel, which is expected, but the same
+              FileName in two files means the inputs overlap and that
+              recording's rows would be doubled.
 
 Rows are otherwise passed through untouched and in the order given: no
 de-duplication, no reordering, no rewriting of values.
@@ -28,7 +33,8 @@ OUTPUT may be:
     a path ending in .csv     -> used as given
 
 Exits 1 if fewer than two inputs are given, an input is missing or empty, the
-columns disagree, the runs disagree, or the output would overwrite an input.
+columns disagree, the runs disagree, a recording appears in more than one
+input, or the output would overwrite an input.
 """
 
 from __future__ import annotations
@@ -154,6 +160,33 @@ def check_runs(tables: list[Table]) -> str:
     return next(iter(run_of.values()))
 
 
+def check_duplicates(tables: list[Table]) -> None:
+    """Exit if a recording appears in more than one file.
+
+    A FileName repeats within a file once per channel, which is expected. The
+    same FileName in two files means the inputs overlap, and merging them would
+    double that recording's rows.
+    """
+    seen: dict[str, Path] = {}
+    shared: dict[tuple[Path, Path], list[str]] = {}
+
+    for t in tables:
+        col = t.column(COL_FILENAME)
+        names = {name for row in t.rows if (name := (row[col] or "").strip())}
+        for name in sorted(names):
+            if first := seen.get(name):
+                shared.setdefault((first, t.path), []).append(name)
+            else:
+                seen[name] = t.path
+
+    if shared:
+        lines = ["Error: the same recording appears in more than one input file."]
+        for (first, second), names in shared.items():
+            lines.append(f"       '{first}' and '{second}' share {len(names)} recording(s):")
+            lines += [f"         {name}" for name in names]
+        sys.exit("\n".join(lines))
+
+
 def resolve_output_path(inputs: list[Path], output: Path | None) -> Path:
     if output is None:
         path = inputs[0].parent / DEFAULT_NAME
@@ -195,14 +228,19 @@ def main():
     args = parse_args()
     if len(args.input_csvs) < 2:
         sys.exit("Error: give at least two CSV files to merge.")
+    given: set[Path] = set()
     for path in args.input_csvs:
         if not path.is_file():
             sys.exit(f"Error: input file '{path}' does not exist.")
+        if (resolved := path.resolve()) in given:
+            sys.exit(f"Error: input file '{path}' was given more than once.")
+        given.add(resolved)
     output_path = resolve_output_path(args.input_csvs, args.output)
 
     tables = [read_table(p) for p in args.input_csvs]
     header = check_headers(tables)
     run = check_runs(tables)
+    check_duplicates(tables)
 
     print(f"Merging {len(tables)} files from run {run}:")
     for t in tables:
