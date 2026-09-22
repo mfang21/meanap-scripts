@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Firing rate difference from baseline</title>
+<style>
+  :root { --ink: #0b0b0b; --muted: #52514e; --line: #e4e3df; --grounded: #e34948; }
+  /* The vertical scrollbar's gutter is reserved even when the page is short.
+     Without it a tall grid brings the scrollbar in only after Plotly has sized
+     itself to the full window, leaving the figure a scrollbar too wide and the
+     page scrolling sideways. */
+  html { overflow-y: scroll; overflow-x: hidden; }
+  html, body { margin: 0; max-width: 100%; }
+  body {
+    font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    color: var(--ink); background: #fff; display: flex; flex-direction: column;
+    min-height: 100vh; overflow-x: hidden;
+  }
+  header {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); flex: none;
+  }
+  header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .run-title { flex: 1 0 100%; font-size: 15px; font-weight: 600; color: var(--ink); }
+  select { font: inherit; padding: 3px 6px; }
+  #status { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  header > * { min-width: 0; }
+  #plot { min-height: 320px; padding: 0 16px; box-sizing: border-box; max-width: 100%; }
+  #banner {
+    margin: 16px; padding: 12px 16px; border: 1px solid var(--grounded); border-radius: 6px;
+    background: #fff5f5; color: #8a1f1f;
+  }
+  #groundedNote { color: var(--muted); font-size: 12px; }
+  #groundedNote b { color: var(--grounded); }
+</style>
+</head>
+<body>
+<header>
+  <div id="runTitle" class="run-title" hidden></div>
+  <label>Slice <select id="slice"></select></label>
+  <label id="sameYLabel"><input type="checkbox" id="sameY"> Same y-axis for all panels</label>
+  <span id="groundedNote" hidden>channels in <b>red</b> were grounded or stimulated</span>
+  <span id="status"></span>
+</header>
+<div id="banner" hidden>
+  Could not load the Plotly.js charting library from cdn.plot.ly. This viewer needs an
+  internet connection the first time it runs on a machine; reconnect and reload the page.
+</div>
+<div id="plot"></div>
+<script type="application/json" id="payload">__PAYLOAD__</script>
+<script type="application/json" id="initial">__INITIAL__</script>
+<script src="__PLOTLY_JS_URL__" onerror="document.getElementById('banner').hidden = false"></script>
+<script>
+(function () {
+  if (typeof Plotly === "undefined") {
+    document.getElementById("banner").hidden = false;
+    return;
+  }
+  const payload = JSON.parse(document.getElementById("payload").textContent);
+  const initial = JSON.parse(document.getElementById("initial").textContent);
+  const allSlices = payload.text.allSlices;
+  const C = payload.colors;
+  const sliceSel = document.getElementById("slice");
+  const sameYBox = document.getElementById("sameY");
+  const sameYLabel = document.getElementById("sameYLabel");
+  const status = document.getElementById("status");
+  const plotEl = document.getElementById("plot");
+  const byId = new Map(payload.panels.map(p => [p.id, p]));
+
+  // Panel geometry, in pixels. Rows are sized in pixels rather than as a
+  // fraction of the figure so that a tall grid keeps readable panels instead of
+  // squeezing every row into one screen.
+  const ROW_H = 300;        // drawable height of one panel
+  const ROW_GAP = 64;       // room beneath a row for its tick labels
+  const MARGIN_T = 64;      // holds the legend, and the top row's panel titles
+  const MARGIN_B = 56;
+  const MARGIN_L = 88;      // holds the y tick labels and the axis title
+  const LEGEND_LIFT = 30;   // px above the plot area, clear of the panel titles
+  const TITLE_STANDOFF = 14; // px between an axis title and its value labels
+
+  const HOVER = "%{customdata[0]} · Channel %{customdata[1]}<br>"
+              + "%{customdata[2]}: %{customdata[3]:+.4~g}%<br>"
+              + "base %{customdata[4]:.4~g} Hz → stim %{customdata[5]:.4~g} Hz<extra></extra>";
+
+  document.title = "Firing rate difference from baseline: " + payload.csv;
+  if (payload.runs.length) {
+    const el = document.getElementById("runTitle");
+    el.textContent = (payload.runs.length === 1 ? "Run: " : "Runs: ") + payload.runs.join(", ");
+    el.hidden = false;
+  }
+  document.getElementById("groundedNote").hidden = !payload.panels.some(p => p.grounded.length);
+
+  // The figure is given an explicit width rather than left to autosize, so it
+  // can never end up wider than the column it sits in. clientWidth counts the
+  // element's own padding, which the figure must not draw into.
+  function plotWidth() {
+    const style = getComputedStyle(plotEl);
+    const pad = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+    return Math.max(320, Math.floor(plotEl.clientWidth - pad));
+  }
+
+  function fill(sel, options, current) {
+    sel.innerHTML = "";
+    for (const [value, text] of options) {
+      const o = document.createElement("option");
+      o.value = value; o.textContent = text;
+      sel.appendChild(o);
+    }
+    sel.value = options.some(([v]) => v === current) ? current : options[0][0];
+  }
+
+  // Seeded so that two exports of the same selection place the dots identically.
+  function rng(seed) {
+    let s = seed >>> 0;
+    return () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+  }
+
+  // plotly.js has no makeSubplots: laying panels out means computing each axis'
+  // domain by hand. Sizes arrive in pixels and are converted against the plot
+  // area they share; panel 0 is the top-left one, so y domains run downwards.
+  function domainsPx(n, sizePx, gapPx) {
+    const total = n * sizePx + (n - 1) * gapPx;
+    const size = sizePx / total, gap = gapPx / total;
+    return Array.from({ length: n }, (_, i) => [i * (size + gap), i * (size + gap) + size]);
+  }
+
+  function domains(n, gap) {
+    const size = (1 - gap * (n - 1)) / n;
+    return Array.from({ length: n }, (_, i) => [i * (size + gap), i * (size + gap) + size]);
+  }
+
+  // A percentage is already normalised, so one shared range keeps a +10% slice
+  // from looking like a +900% one.
+  function yRangeFor(values) {
+    let lo = 0, hi = 0;
+    if (values.length) {
+      for (const v of values) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    } else {
+      lo = -100; hi = 100;
+    }
+    const pad = 0.08 * ((hi - lo) || 1);
+    return [lo - pad, hi + pad];
+  }
+
+  function fmtPct(v) {
+    return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(Math.abs(v) < 10 ? 1 : 0) + "%";
+  }
+
+  function render() {
+    const sel = sliceSel.value;
+    const panels = sel === allSlices ? payload.panels : [byId.get(sel)].filter(Boolean);
+    const n = panels.length;
+    if (!n) { Plotly.purge("plot"); status.textContent = ""; return; }
+    const single = n === 1;
+    // With one panel there is no second axis to match, so the control is inert.
+    sameYLabel.hidden = single;
+
+    // Panels wrap to fewer columns on a narrow window instead of the figure
+    // growing past it, so the page never scrolls sideways.
+    const width = plotWidth();
+    let nCols = single ? 1 : (n <= 6 ? 2 : 3);
+    if (width < 1100) nCols = Math.min(nCols, 2);
+    if (width < 700) nCols = 1;
+    const nRows = Math.ceil(n / nCols);
+    const xdom = domains(nCols, nCols > 2 ? 0.05 : 0.07);
+
+    const headerH = document.querySelector("header").offsetHeight;
+    const height = single ? Math.max(460, window.innerHeight - headerH - 24)
+                          : MARGIN_T + nRows * ROW_H + (nRows - 1) * ROW_GAP + MARGIN_B;
+    const plotAreaPx = Math.max(1, height - MARGIN_T - MARGIN_B);
+    const ydom = (single ? domains(1, 0) : domainsPx(nRows, ROW_H, ROW_GAP)).reverse();
+
+    // One shared y-axis unless the box is unticked, in which case each panel
+    // scales to its own data.
+    let shared = null;
+    if (sameYBox.checked) {
+      const values = [];
+      for (const p of panels) for (const pt of p.points) values.push(pt.p);
+      shared = yRangeFor(values);
+    }
+
+    const traces = [];
+    const annotations = [];
+    const layout = {};
+    const legendSeen = new Set();
+
+    panels.forEach((panel, i) => {
+      const s = i === 0 ? "" : String(i + 1);
+      const row = Math.floor(i / nCols), col = i % nCols;
+      const chans = panel.channels;
+      const pos = new Map(chans.map((c, j) => [c, j]));
+      const range = shared || yRangeFor(panel.points.map(p => p.p));
+
+      // Re-seeded per panel so a slice's dots land in the same places in the
+      // grid and in the single-slice view.
+      const rand = rng(0);
+      for (const token of payload.stims) {
+        const pts = panel.points.filter(p => p.t === token);
+        if (!pts.length) continue;
+        const show = !legendSeen.has(token);
+        legendSeen.add(token);
+        traces.push({
+          type: "scatter", mode: "markers",
+          name: payload.labels[token], legendgroup: token, showlegend: show,
+          x: pts.map(p => pos.get(p.c) + (rand() * 0.36 - 0.18)), y: pts.map(p => p.p),
+          marker: { size: 6, color: C.stim[token], opacity: 0.8 },
+          customdata: pts.map(p => [panel.title, p.c, payload.labels[p.t], p.p, p.b, p.s]),
+          hovertemplate: HOVER,
+          xaxis: "x" + s, yaxis: "y" + s,
+        });
+      }
+
+      // Ticks thin out in the grid so the labels stay readable, but a grounded
+      // channel always keeps its tick: the red number is the only thing marking
+      // it, since it has no point to plot.
+      const grounded = new Set(panel.grounded);
+      const budget = single ? chans.length : (nCols <= 2 ? 16 : 10);
+      const step = Math.max(1, Math.ceil(chans.length / budget));
+      const keep = new Set(chans.filter((_, j) => j % step === 0));
+      for (const c of grounded) keep.add(c);
+      const shown = chans.filter(c => keep.has(c));
+      const crowded = shown.length > 24;
+      const isBottom = (i + nCols) >= n;
+
+      layout["xaxis" + s] = Object.assign({
+        domain: xdom[col], anchor: "y" + s,
+        tickmode: "array", tickvals: shown.map(c => pos.get(c)),
+        ticktext: shown.map(c => grounded.has(c)
+          ? '<span style="color:' + C.grounded + '">' + c + "</span>" : String(c)),
+        range: [-0.7, chans.length - 0.3], tickangle: crowded ? -90 : 0,
+        tickfont: { size: single ? 10 : 9 }, showgrid: false,
+        showline: true, linecolor: C.grid, zeroline: false, ticks: "outside", tickcolor: C.grid,
+      }, isBottom ? { title: { text: payload.text.x, font: { size: 11 },
+                               standoff: TITLE_STANDOFF } } : {});
+
+      layout["yaxis" + s] = Object.assign({
+        domain: ydom[row], anchor: "x" + s, range: range,
+        gridcolor: C.grid, zeroline: true, zerolinecolor: C.zeroLine, zerolinewidth: 1,
+        tickfont: { size: single ? 10 : 9 }, ticksuffix: "%",
+        showline: true, linecolor: C.grid, ticks: "outside", tickcolor: C.grid,
+      }, col === 0 ? { title: { text: payload.text.y, font: { size: 11 },
+                                standoff: TITLE_STANDOFF } } : {});
+
+      // Only the grid needs these: with one panel the drop-down already names
+      // the slice, so a title on top of it is noise.
+      if (!single) annotations.push({
+        text: panel.title, showarrow: false,
+        xref: "x" + s + " domain", yref: "y" + s + " domain",
+        x: 0, xanchor: "left", y: 1, yanchor: "bottom", yshift: 6,
+        font: { size: 12, color: "#0b0b0b" },
+      });
+    });
+
+    Object.assign(layout, {
+      annotations,
+      // Overhead and flush with the right edge of the plot area: x is in paper
+      // units, so xanchor "right" at x = 1 keeps it inside the panels rather
+      // than hanging off the side. Lifted clear of the panel titles, which sit
+      // at the same height on the left.
+      legend: { orientation: "h", x: 1, xanchor: "right",
+                y: 1 + LEGEND_LIFT / plotAreaPx, yanchor: "bottom",
+                traceorder: "normal", font: { size: 11 } },
+      showlegend: true,
+      margin: { l: MARGIN_L, r: 20, t: MARGIN_T, b: MARGIN_B },
+      width: width, height: height,
+      hovermode: "closest", paper_bgcolor: "#fff", plot_bgcolor: "#fff",
+      font: { family: "-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif",
+              color: C.ink },
+    });
+
+    const config = {
+      displaylogo: false, modeBarButtonsToRemove: ["select2d", "lasso2d"],
+      toImageButtonOptions: {
+        format: "png", scale: initial.scale,
+        filename: ("fr_diff_" + (sel === allSlices ? "all" : sel)).replace(/[^\w-]+/g, "_"),
+      },
+    };
+    Plotly.react("plot", traces, layout, config);
+
+    const paired = panels.reduce((a, p) => a + p.n.paired, 0);
+    const grounded = panels.reduce((a, p) => a + p.n.grounded, 0);
+    const stimOnly = panels.reduce((a, p) => a + p.n.missingBase, 0);
+    const parts = [n + (n === 1 ? " slice" : " slices"), paired + " channels paired"];
+    if (grounded) parts.push(grounded + " grounded or stimulated");
+    if (stimOnly) parts.push(stimOnly + " stim-only");
+    let msg = parts.join(" · ");
+    // Folded rather than spread: a big file holds more percentages than
+    // Math.min(...array) can take as arguments.
+    let lo = Infinity, hi = -Infinity;
+    for (const p of panels) for (const q of p.points) {
+      if (q.p < lo) lo = q.p;
+      if (q.p > hi) hi = q.p;
+    }
+    if (lo <= hi) msg += "   |   range " + fmtPct(lo) + " … " + fmtPct(hi);
+    status.textContent = msg;
+  }
+
+  fill(sliceSel, [[allSlices, allSlices]].concat(payload.panels.map(p => [p.id, p.title])),
+       initial.slice);
+  sameYBox.checked = initial.sameY;
+  sliceSel.addEventListener("change", render);
+  sameYBox.addEventListener("change", render);
+  let resizeTimer = null;
+  window.addEventListener("resize", () => {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(render, 120);
+  });
+  render();
+})();
+</script>
+</body>
+</html>
