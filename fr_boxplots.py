@@ -3,21 +3,15 @@
 
 Each row of the CSV holds one (FileName, Grp, Channel, FR) observation. A box is
 drawn for every channel; the values inside a box are the FR readings for that
-channel taken from every recording (FileName) in the selected group. Choosing an
-organoid does not change the boxes: the group's boxes stay as they are and only
-that organoid's readings are overlaid on top, coloured by slice, so a single
-organoid can be compared against its group's channel distribution.
-The FileName / Channel / FR triple is always taken from the same row, so the
-association between a recording, its channel and that channel's firing rate is
-never broken.
+channel taken from every recording (FileName) in the selected group. 
+
+Choosing an organoid does not change the boxes: the group's boxes stay as they 
+are and only that organoid's readings are overlaid on top, coloured by slice, 
+so a single organoid can be compared against its group's channel distribution.
 
 The "All groups" view is a channel overview: one box per channel built from
 every recording in the file regardless of group. Use it to spot channels that
 record low firing rates throughout.
-
-Organoid identity is parsed from the file name. The segment right after the
-group marker ("CT" for BCTL, "MO" for BMOS, "MT" for BMUT) is a number-letter
-pair, e.g. "R250929CT7A_DIV250" -> organoid "CT7", slice "CT7A".
 
 Stim types (conditions) are analysed separately
 -----------------------------------------------
