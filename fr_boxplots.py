@@ -530,8 +530,8 @@ def stim_path(path: Path, stim: str | None, multi: bool) -> Path:
 def _open_in_browser(out: Path) -> None:
     chrome_path = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
     try:
-        win_path = subprocess.check_output(["wslpath", "-w", str(out.resolve())])
-        subprocess.run([chrome_path, win_path], check=True)
+        win_path = subprocess.check_output(["wslpath", "-w", str(out.resolve())], text=True)
+        subprocess.Popen([chrome_path, win_path.strip()], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (subprocess.CalledProcessError, FileNotFoundError):
         webbrowser.open(out.as_uri())
 
