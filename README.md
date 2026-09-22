@@ -1,6 +1,6 @@
 # MEA-NAP Scripts
 
-Utility scripts for post-processing output from [MEA-NAP](https://github.com/SAND-Lab/MEA-NAP), the MATLAB pipeline for analyzing microelectrode array (MEA) recordings. These scripts operate on MEA-NAP's CSV exports to handle specific downstream tasks: filtering recording groups, visualizing per-channel firing rate distributions, and checking normality of selected metrics ahead of statistical testing.
+Utility scripts for post-processing output from [MEA-NAP](https://github.com/SAND-Lab/MEA-NAP), the MATLAB pipeline for analyzing microelectrode array (MEA) recordings. These scripts operate on MEA-NAP's CSV exports to handle specific downstream tasks: merging a run's per-condition exports, filtering recording groups, visualizing per-channel firing rate distributions, and checking normality of selected metrics ahead of statistical testing.
 
 ## Scripts
 
@@ -15,6 +15,16 @@ python3 fr_boxplots.py data.csv --list                         # list stims/grou
 python3 fr_boxplots.py data.csv -o viewer.html                 # write the interactive viewer(s) to file(s) to share
 python3 fr_boxplots.py data.csv --stim stim1 -o viewer.html    # a single condition only
 python3 fr_boxplots.py data.csv --grp BCTL --organoid CT7 -o bctl_ct7.png   # save a static figure
+```
+
+### `merge_csv.py`
+Merges two or more MEA-NAP CSV exports that share a column layout and a recording run into one file — typically the per-condition node-level exports of a single run (`_base`, `_stim1`, `_stim3`, `_stimLR`, `_stimRL`).
+
+Nothing is written until two checks pass. Every file must carry the same set of columns (compared ignoring case and order; the merged file uses the first file's spelling and order), and every row must come from the same run, identified by the leading `R<digits>` token of its `FileName` — `R250929` in `R250929CT7A_DIV250_stim1`. A file holding two runs, or one from a different run than the rest, stops the merge. Rows are otherwise passed through untouched and in the order given: no de-duplication and no reordering. The inputs are never modified; the default output is `NeuronalActivity_NodeLevel_base_stim_merged.csv`, written beside the first input.
+
+```
+python3 merge_csv.py base.csv stim1.csv stim3.csv
+python3 merge_csv.py stimLR.csv stimRL.csv -o combined.csv
 ```
 
 ### `grp_filter.py`
