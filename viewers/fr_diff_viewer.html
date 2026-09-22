@@ -22,6 +22,9 @@
     padding: 10px 16px; border-bottom: 1px solid var(--line); flex: none;
   }
   header label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  /* display:flex above outranks the user agent's [hidden] rule, so hiding a
+     label needs saying again here. */
+  header label[hidden] { display: none; }
   .run-title { flex: 1 0 100%; font-size: 15px; font-weight: 600; color: var(--ink); }
   select { font: inherit; padding: 3px 6px; }
   #status { margin-left: auto; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
@@ -217,8 +220,16 @@
       const grounded = new Set(panel.grounded);
       const budget = single ? chans.length : (nCols <= 2 ? 16 : 10);
       const step = Math.max(1, Math.ceil(chans.length / budget));
-      const keep = new Set(chans.filter((_, j) => j % step === 0));
-      for (const c of grounded) keep.add(c);
+      // The grounded ticks go in first and a regular tick yields to one it would
+      // collide with, so a red number never ends up overprinted by its neighbour.
+      const keep = new Set(grounded);
+      const clearance = step > 1 ? Math.max(1, Math.floor(step / 2)) : 0;
+      const groundedAt = chans.map((c, j) => grounded.has(c) ? j : -1).filter(j => j >= 0);
+      chans.forEach((c, j) => {
+        if (keep.has(c) || j % step !== 0) return;
+        if (groundedAt.some(g => Math.abs(g - j) <= clearance)) return;
+        keep.add(c);
+      });
       const shown = chans.filter(c => keep.has(c));
       const crowded = shown.length > 24;
       const isBottom = (i + nCols) >= n;
