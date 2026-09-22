@@ -265,11 +265,10 @@
 
     Object.assign(layout, {
       annotations,
-      // Overhead and flush with the right edge of the plot area: x is in paper
-      // units, so xanchor "right" at x = 1 keeps it inside the panels rather
-      // than hanging off the side. Lifted clear of the panel titles, which sit
-      // at the same height on the left.
-      legend: { orientation: "h", x: 1, xanchor: "right",
+      // Overhead and centered over the plot area: x is in paper units, so
+      // Lifted clear of the panel titles, which sit at the same height on
+      // the left.
+      legend: { orientation: "h", x: 0.5, xanchor: "center",
                 y: 1 + LEGEND_LIFT / plotAreaPx, yanchor: "bottom",
                 traceorder: "normal", font: { size: 11 } },
       showlegend: true,
