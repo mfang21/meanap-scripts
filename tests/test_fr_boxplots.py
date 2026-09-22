@@ -1,4 +1,4 @@
-"""Run with: python3 -m unittest test_fr_boxplots.py"""
+"""Run with: python3 -m unittest discover -t . -s tests"""
 
 import json
 import subprocess
@@ -6,6 +6,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from matplotlib import cbook
 
@@ -274,6 +276,54 @@ class Cli(unittest.TestCase):
                          "-o", str(Path(tmp) / "overview.png"))
             self.assertTrue((Path(tmp) / "overview_stim1.png").is_file())
             self.assertTrue((Path(tmp) / "overview_stim3.png").is_file())
+
+
+SAMPLE_CSV = Path(__file__).resolve().parent / "sample-files" / "NeuronalActivity_NodeLevel_sample.csv"
+
+
+class SampleFile(unittest.TestCase):
+    """Checks against a real-world-shaped export: extra unused columns padded
+    with NaN, an FR of exactly 0, and one file name whose DIV segment has no
+    digits (so it doesn't match the usual DIV<n>_ pattern)."""
+
+    def test_load_records_reads_every_row(self):
+        records = fb.load_records(SAMPLE_CSV)
+        self.assertEqual(len(records), 5)
+
+    def test_extra_nan_columns_are_ignored(self):
+        records = fb.load_records(SAMPLE_CSV)
+        by_filename = {r.filename: r for r in records}
+        self.assertEqual(by_filename["R250929MO7C_DIV_stim3"].fr, 0.95)
+
+    def test_fr_of_zero_is_kept_not_treated_as_missing(self):
+        records = fb.load_records(SAMPLE_CSV)
+        by_filename = {r.filename: r for r in records}
+        self.assertEqual(by_filename["R250929MO2A_DIV250_stimRL"].fr, 0)
+
+    def test_organoid_parsed_for_every_group_marker(self):
+        records = fb.load_records(SAMPLE_CSV)
+        by_filename = {r.filename: r for r in records}
+        self.assertEqual(by_filename["R250929CT1A_DIV250_stim1"].organoid, "CT1")
+        self.assertEqual(by_filename["R250929MT3D_DIV250_base"].organoid, "MT3")
+        self.assertEqual(by_filename["R250929MO2A_DIV250_stimRL"].organoid, "MO2")
+
+    def test_malformed_div_segment_yields_no_stim(self):
+        records = fb.load_records(SAMPLE_CSV)
+        by_filename = {r.filename: r for r in records}
+        self.assertIsNone(by_filename["R250929MO7C_DIV_stim3"].stim)
+
+    def test_cli_runs_end_to_end_on_the_sample_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "viewer.html"
+            proc = subprocess.run(
+                [sys.executable, str(Path(fb.__file__)), str(SAMPLE_CSV), "-o", str(out)],
+                capture_output=True, text=True,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            html_files = list(Path(tmp).glob("*.html"))
+            self.assertEqual(len(html_files), 5)
+            for f in html_files:
+                self.assertIn('id="payload"', f.read_text())
 
 
 if __name__ == "__main__":
