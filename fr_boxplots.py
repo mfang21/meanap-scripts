@@ -462,9 +462,9 @@ def figure_size(records: list[Record], grp: str, organoid: str | None) -> tuple[
 
 # The viewer is one self-contained HTML page: the parsed records and the box
 # statistics (computed above, in Python) are inlined as JSON, and the script
-# in fr_boxplots_viewer.html only filters and displays them. It mirrors
-# draw() one-to-one.
-VIEWER_HTML_PATH = Path(__file__).with_name("fr_boxplots_viewer.html")
+# in the page template only filters and displays them. It mirrors draw()
+# one-to-one. The templates for every script live together in viewers/.
+VIEWER_HTML_PATH = Path(__file__).parent / "viewers" / "fr_boxplots_viewer.html"
 
 
 def build_payload(records: list[Record], csv_name: str, stim: str | None = None) -> dict:
