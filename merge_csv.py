@@ -5,26 +5,26 @@ Written for combining the per-condition node-level exports of one run
 
 Any number of CSVs can be given. Nothing is written until four checks pass:
 
-    Columns   Every file must carry the same set of columns, compared without
-              regard to case or order. The merged file uses the first file's
-              spelling and column order.
+    Columns     Every file must carry the same set of columns, compared without
+                regard to case or order. The merged file uses the first file's
+                spelling and column order.
 
-    Run       Every row of every file must come from the same run, identified
-              by the leading R<digits> token of its FileName, e.g. "R250929" in
-              "R250929CT7A_DIV250_stim1". A file holding two runs, or a file
-              from a different run than the others, stops the merge.
+    Run         Every row of every file must come from the same run, identified
+                by the leading R<digits> token of its FileName, e.g. "R250929" in
+                "R250929CT7A_DIV250_stim1". A file holding two runs, or a file
+                from a different run than the others, stops the merge.
 
-    Repeats   No recording may appear in more than one file. A FileName repeats
-              within a file once per channel, which is expected, but the same
-              FileName in two files means the inputs overlap and that
-              recording's rows would be doubled.
+    Repeats     No recording may appear in more than one file. A FileName repeats
+                within a file once per channel, which is expected, but the same
+                FileName in two files means the inputs overlap and that
+                recording's rows would be doubled.
 
     Recordings  No recording may be present twice under any guise: the same
-              FileName and Channel on two rows (checked when there is a Channel
-              column), or two FileNames that differ only in their DIV<n> token,
-              e.g. "R250929CT1A_DIV250_base" and "R250929CT1A_DIV251_base" --
-              the same slice and condition recorded twice, which leaves no way
-              to tell which one a reading belongs with.
+                FileName and Channel on two rows (checked when there is a Channel
+                column), or two FileNames that differ only in their DIV<n> token,
+                e.g. "R250929CT1A_DIV250_base" and "R250929CT1A_DIV251_base" --
+                the same slice and condition recorded twice, which leaves no way
+                to tell which one a reading belongs with.
 
 Rows are otherwise passed through untouched and in the order given: no
 de-duplication, no reordering, no rewriting of values.
