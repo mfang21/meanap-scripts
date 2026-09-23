@@ -35,7 +35,10 @@
     background: #fff5f5; color: #8a1f1f;
   }
   #excludedNote, #silentNote { color: var(--muted); font-size: 12px; }
-  #excludedNote { flex: 1 0 100%; text-align: center; }
+  /* The note rides on the status line: it takes over the push to the right, so
+     the two sit together rather than splitting the free space between them. */
+  #excludedNote { margin-left: auto; }
+  #excludedNote:not([hidden]) + #status { margin-left: 0; }
   #excludedNote b { color: var(--excluded); }
 </style>
 </head>
@@ -49,8 +52,8 @@
   </select></label>
   <label id="sameYLabel"><input type="checkbox" id="sameY"> Same y-axis for all panels</label>
   <span id="silentNote" hidden>&#9660; at a panel's foot: 0&nbsp;Hz under that pattern (log&#8322; = &minus;&infin;)</span>
-  <span id="status"></span>
   <span id="excludedNote" hidden>Channels in <b>red</b> were excluded (grounded, stimulating, or 0&nbsp;Hz at baseline); run <code>--list</code> for which</span>
+  <span id="status"></span>
 </header>
 <div id="banner" hidden>
   Could not load the Plotly.js charting library from cdn.plot.ly. This viewer needs an
