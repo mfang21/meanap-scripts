@@ -105,8 +105,8 @@ BASELINE = "prestim"               # the condition every stim is measured agains
 
 # Condition token -> the name shown in the legend. A slice needs the baseline
 # and every one of these to be plotted; any other condition is ignored.
-STIM_LABELS = {"stim1": "Stim 1", "stim3": "Stim 3",
-               "stimLR": "Stim LR", "stimRL": "Stim RL"}
+STIM_LABELS = {"stim1": "Spatial 1", "stim3": "Spatial 3",
+               "stimLR": "Temporal LR", "stimRL": "Temporal RL"}
 REQUIRED_STIMS = tuple(STIM_LABELS)
 STIM_COLORS = dict(zip(STIM_LABELS, PALETTE))
 

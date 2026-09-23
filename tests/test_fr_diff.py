@@ -300,7 +300,7 @@ class PanelTitle(unittest.TestCase):
 class StimLabel(unittest.TestCase):
     def test_the_four_patterns_have_their_own_names(self):
         self.assertEqual([fd.stim_label(t) for t in ("stim1", "stim3", "stimLR", "stimRL")],
-                         ["Stim 1", "Stim 3", "Stim LR", "Stim RL"])
+                         ["Spatial 1", "Spatial 3", "Temporal LR", "Temporal RL"])
 
     def test_every_pattern_has_its_own_colour(self):
         self.assertEqual(len(set(fd.STIM_COLORS.values())), len(STIMS))
@@ -436,7 +436,7 @@ class Cli(unittest.TestCase):
             self.run_cli(tmp, str(csv_path), "-o", str(out))
             html = out.read_text()
             self.assertIn('id="payload"', html)
-            self.assertIn("Stim LR", html)
+            self.assertIn("Temporal LR", html)
             self.assertEqual(len(list(Path(tmp).glob("*.html"))), 1)
 
     def test_an_incomplete_file_fails_and_writes_nothing(self):
