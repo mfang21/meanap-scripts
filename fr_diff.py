@@ -113,10 +113,15 @@ STIM_COLORS = dict(zip(STIM_LABELS, PALETTE))
 # Electrodes whose readings are not the organoid's. A grounded channel is left
 # out of every recording; a stimulating channel only out of the pattern that
 # drove it (condition token -> channels). Channel 15 is grounded in every
-# experiment. The stimulating electrodes of each pattern are not filled in yet
-# (mfang21/meanap-scripts#2).
+# experiment; channels 21, 31, 41, 51, 61 and 71 were stimulated and left out of
+# spike counting, so they read 0 Hz by design. They are listed under every
+# pattern for now; a pattern that drives only some of them can list fewer.
 GROUNDED_CHANNELS: frozenset[int] = frozenset({15})
-STIMULATED_CHANNELS: dict[str, frozenset[int]] = {}
+_STIM_ELECTRODES = frozenset({21, 31, 41, 51, 61, 71})
+STIMULATED_CHANNELS: dict[str, frozenset[int]] = {
+    "stim1": _STIM_ELECTRODES, "stim3": _STIM_ELECTRODES,
+    "stimLR": _STIM_ELECTRODES, "stimRL": _STIM_ELECTRODES,
+}
 
 EXCLUDED_COLOR = "#e34948"         # excluded channel numbers on the x axis, nothing else
 GRID_COLOR = "#e4e3df"
@@ -337,20 +342,25 @@ def _classify(panel: Panel, channel: int, base_fr: float,
     if channel in GROUNDED_CHANNELS:
         panel.excluded.append(Excluded(channel, EXCLUDED_GROUNDED, base_fr, readings))
         return
-    # TODO: a 0 Hz baseline is taken to mean an electrode that recorded nothing;
-    # whether any are really silent-then-recruited channels is still open (#3).
-    if base_fr == 0:
-        panel.excluded.append(Excluded(channel, EXCLUDED_ZERO_BASE, base_fr, readings))
-        return
+    # A known stimulating electrode is named as such before its baseline is
+    # looked at: it reads 0 Hz by design, and "0 Hz baseline" is kept for the
+    # zeros nothing explains.
     driving = tuple((t, fr) for t, fr in readings
                     if channel in STIMULATED_CHANNELS.get(t, ()))
     if driving:
         panel.excluded.append(Excluded(channel, EXCLUDED_STIMULATING, base_fr, driving))
     driven_by = {t for t, _ in driving}
-    for token, stim_fr in readings:
-        if token not in driven_by:
-            panel.diffs.append(Diff(channel, token, pct_diff(base_fr, stim_fr),
-                                    base_fr, stim_fr))
+    rest = tuple((t, fr) for t, fr in readings if t not in driven_by)
+    if not rest:
+        return
+    # TODO: a 0 Hz baseline is taken to mean an electrode that recorded nothing;
+    # whether any are really silent-then-recruited channels is still open (#3).
+    if base_fr == 0:
+        panel.excluded.append(Excluded(channel, EXCLUDED_ZERO_BASE, base_fr, rest))
+        return
+    for token, stim_fr in rest:
+        panel.diffs.append(Diff(channel, token, pct_diff(base_fr, stim_fr),
+                                base_fr, stim_fr))
 
 
 def build_panels(records: list[Record]) -> tuple[list[Panel], list[Unpaired]]:

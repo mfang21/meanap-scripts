@@ -261,6 +261,23 @@ class Exclusions(unittest.TestCase):
         self.assertEqual({d.stim for d in panels[0].diffs}, set(STIMS) - {"stim1"})
         self.assertEqual(panels[0].unplotted, [])
 
+    def test_the_known_stimulating_electrodes_are_excluded_from_every_pattern(self):
+        panels, _ = panels_of(recs(full_set(base={1: 2.0, 21: 0.0, 71: 1.5})))
+        self.assertEqual({d.channel for d in panels[0].diffs}, {1})
+        self.assertEqual({(e.channel, e.reason) for e in panels[0].excluded},
+                         {(21, fd.EXCLUDED_STIMULATING), (71, fd.EXCLUDED_STIMULATING)})
+        self.assertEqual(panels[0].unplotted, [21, 71])
+
+    def test_a_zero_baseline_on_a_part_stimulating_channel_is_still_named(self):
+        with mock.patch.dict(fd.STIMULATED_CHANNELS, {"stim1": frozenset({1}),
+                                                      "stim3": frozenset(),
+                                                      "stimLR": frozenset(),
+                                                      "stimRL": frozenset()}):
+            panels, _ = panels_of(recs(full_set(base={1: 0.0})))
+        self.assertEqual([e.reason for e in panels[0].excluded],
+                         [fd.EXCLUDED_STIMULATING, fd.EXCLUDED_ZERO_BASE])
+        self.assertEqual(panels[0].diffs, [])
+
     def test_a_negative_baseline_is_skipped(self):
         panels, _ = panels_of(recs(full_set(base={1: 2.0, 2: -1.0})))
         self.assertEqual({d.channel for d in panels[0].diffs}, {1})
