@@ -98,6 +98,25 @@ class PctDiff(unittest.TestCase):
         self.assertEqual(fd.pct_diff(3.0, 0.0), -100.0)
 
 
+class Log2Ratio(unittest.TestCase):
+    def test_doubling_and_halving_are_symmetric(self):
+        self.assertEqual(fd.log2_ratio(2.0, 4.0), 1.0)
+        self.assertEqual(fd.log2_ratio(4.0, 2.0), -1.0)
+
+    def test_no_change_is_zero(self):
+        self.assertEqual(fd.log2_ratio(3.0, 3.0), 0.0)
+
+    def test_falling_silent_has_no_finite_ratio(self):
+        self.assertIsNone(fd.log2_ratio(3.0, 0.0))
+
+    def test_every_diff_carries_its_ratio(self):
+        stims = {"stim1": {1: 0.0}, "stim3": {1: 8.0}}
+        panels, _ = panels_of(recs(full_set(stims=stims)))
+        by_stim = {d.stim: d.log2 for d in panels[0].diffs}
+        self.assertIsNone(by_stim["stim1"])
+        self.assertEqual(by_stim["stim3"], 2.0)
+
+
 class Completeness(unittest.TestCase):
     def test_a_complete_slice_makes_one_panel(self):
         panels, unpaired = panels_of(recs(full_set()))
@@ -348,6 +367,14 @@ class Payload(unittest.TestCase):
         self.assertEqual(ct1a["missingBase"], [9])
         self.assertIn(2, ct1a["channels"])
 
+    def test_a_silent_reading_travels_as_a_null_ratio(self):
+        panels, _ = panels_of(recs(full_set(stims={"stim1": {1: 0.0}})))
+        payload = json.loads(json.dumps(fd.build_payload(panels, "data.csv")))
+        by_stim = {q["t"]: q["l"] for q in payload["panels"][0]["points"]}
+        self.assertIsNone(by_stim["stim1"])
+        self.assertAlmostEqual(by_stim["stim3"], 0.584963, places=5)
+        self.assertIn("yLog2", payload["text"])
+
     def test_the_excluded_colour_travels_with_the_payload(self):
         _, payload = self.build()
         self.assertEqual(payload["colors"]["excluded"], fd.EXCLUDED_COLOR)
@@ -471,6 +498,20 @@ class Cli(unittest.TestCase):
             out = Path(tmp) / "diff.html"
             self.run_cli(tmp, str(csv_path), "--dpi", "96", "-o", str(out))
             self.assertEqual(self.initial_of(out.read_text())["scale"], 1.0)
+
+    def test_the_viewer_opens_on_the_percentage_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = write_csv(tmp, "data.csv", PAIRED_ROWS)
+            out = Path(tmp) / "diff.html"
+            self.run_cli(tmp, str(csv_path), "-o", str(out))
+            self.assertEqual(self.initial_of(out.read_text())["measure"], "pct")
+
+    def test_log2_opens_the_viewer_on_the_ratio(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            csv_path = write_csv(tmp, "data.csv", PAIRED_ROWS)
+            out = Path(tmp) / "diff.html"
+            self.run_cli(tmp, str(csv_path), "--log2", "-o", str(out))
+            self.assertEqual(self.initial_of(out.read_text())["measure"], "log2")
 
     def test_per_panel_y_unticks_the_shared_axis(self):
         with tempfile.TemporaryDirectory() as tmp:

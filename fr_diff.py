@@ -59,6 +59,13 @@ Interactive viewer (default) opens in the web browser:
 Write the viewer to a file (to share, or on a headless machine):
     python3 fr_diff.py data.csv -o diff.html
     python3 fr_diff.py data.csv --slice CT1A -o diff.html    # initial selection
+    python3 fr_diff.py data.csv --log2 -o diff.html          # open on log2(stim / prestim)
+
+The "Measure" drop-down switches the y-axis between the percentage change and
+log2(stim / prestim), which is symmetric (halving -1, doubling +1) where the
+percentage runs from -100% to unbounded above. A reading of 0 Hz under
+stimulation has a log2 of -inf; in that view it is drawn as a downward triangle
+at the foot of its panel instead of being dropped.
 
 List what was plotted and what was not, with per-slice channel counts:
     python3 fr_diff.py data.csv --list
@@ -72,6 +79,7 @@ grammar). Unlike fr_boxplots.py it does not need matplotlib.
 from __future__ import annotations
 
 import argparse
+import math
 import re
 import sys
 import tempfile
@@ -141,6 +149,7 @@ class Diff:
     pct: float           # 100 * (stim_fr - base_fr) / base_fr
     base_fr: float
     stim_fr: float
+    log2: float | None   # log2(stim_fr / base_fr); None when stim_fr is 0 (-inf)
 
 
 EXCLUDED_GROUNDED = "grounded"
@@ -238,6 +247,16 @@ def group_of(grp: str) -> str:
 def pct_diff(base_fr: float, stim_fr: float) -> float:
     """Percentage change from `base_fr` to `stim_fr`. `base_fr` must be above 0."""
     return 100.0 * (stim_fr - base_fr) / base_fr
+
+
+def log2_ratio(base_fr: float, stim_fr: float) -> float | None:
+    """log2(stim_fr / base_fr), or None when `stim_fr` is 0 and the ratio is -inf.
+
+    Unlike a percentage it is symmetric: halving is -1 and doubling is +1, so a
+    low baseline cannot stretch the axis in one direction only. `base_fr` must
+    be above 0.
+    """
+    return math.log2(stim_fr / base_fr) if stim_fr > 0 else None
 
 
 def stim_label(token: str) -> str:
@@ -360,7 +379,7 @@ def _classify(panel: Panel, channel: int, base_fr: float,
         return
     for token, stim_fr in rest:
         panel.diffs.append(Diff(channel, token, pct_diff(base_fr, stim_fr),
-                                base_fr, stim_fr))
+                                base_fr, stim_fr, log2_ratio(base_fr, stim_fr)))
 
 
 def build_panels(records: list[Record]) -> tuple[list[Panel], list[Unpaired]]:
@@ -539,6 +558,7 @@ def build_payload(panels: list[Panel], csv_name: str) -> dict:
         "range": {"min": lo, "max": hi},
         "text": {"allSlices": ALL_SLICES,
                  "y": "Firing rate difference from baseline (%)",
+                 "yLog2": "Firing rate change from baseline (log\u2082 stim / prestim)",
                  "x": "Channel"},
         "panels": [{
             "id": p.id, "title": panel_title(p, multi),
@@ -546,7 +566,7 @@ def build_payload(panels: list[Panel], csv_name: str) -> dict:
             "baseFile": p.base_file,
             "stims": p.stims,
             "channels": p.channels,
-            "points": [{"c": d.channel, "t": d.stim, "p": d.pct,
+            "points": [{"c": d.channel, "t": d.stim, "p": d.pct, "l": d.log2,
                         "b": d.base_fr, "s": d.stim_fr} for d in p.diffs],
             "excluded": p.unplotted,
             "missingBase": p.missing_base,
@@ -555,11 +575,14 @@ def build_payload(panels: list[Panel], csv_name: str) -> dict:
     }
 
 
+MEASURES = ("pct", "log2")         # what the y-axis shows; the viewer can switch
+
+
 def initial_state(slice_: str | None = None, same_y: bool = True,
-                  dpi: int = SAVE_DPI) -> dict:
+                  dpi: int = SAVE_DPI, measure: str = "pct") -> dict:
     # Plotly's export scale multiplies CSS pixels, which browsers lay out at 96/inch.
     return {"slice": slice_ or ALL_SLICES, "sameY": same_y,
-            "scale": round(dpi / 96, 2)}
+            "scale": round(dpi / 96, 2), "measure": measure}
 
 
 def render_html(payload: dict, initial: dict) -> str:
@@ -619,6 +642,9 @@ def parse_args():
     parser.add_argument("--per-panel-y", action="store_true",
                         help="Scale each panel's y-axis to its own data instead of sharing one "
                              "axis across every panel.")
+    parser.add_argument("--log2", action="store_true",
+                        help="Open the viewer on log2(stim / prestim) instead of the percentage "
+                             "change (the viewer can switch between the two).")
     parser.add_argument("--dpi", type=int, default=SAVE_DPI,
                         help=f"Resolution of the viewer's PNG export (default {SAVE_DPI}).")
     return parser.parse_args()
@@ -650,7 +676,8 @@ def main():
                  f"file holds.")
 
     selected = resolve_slice(panels, args.slice) if args.slice else None
-    initial = initial_state(selected, not args.per_panel_y, args.dpi)
+    initial = initial_state(selected, not args.per_panel_y, args.dpi,
+                            "log2" if args.log2 else "pct")
 
     if args.output is None:
         open_viewer(panels, args.input_csv, initial)

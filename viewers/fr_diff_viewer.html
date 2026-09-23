@@ -34,7 +34,8 @@
     margin: 16px; padding: 12px 16px; border: 1px solid var(--excluded); border-radius: 6px;
     background: #fff5f5; color: #8a1f1f;
   }
-  #excludedNote { color: var(--muted); font-size: 12px; flex: 1 0 100%; text-align: center; }
+  #excludedNote, #silentNote { color: var(--muted); font-size: 12px; }
+  #excludedNote { flex: 1 0 100%; text-align: center; }
   #excludedNote b { color: var(--excluded); }
 </style>
 </head>
@@ -42,7 +43,12 @@
 <header>
   <div id="runTitle" class="run-title" hidden></div>
   <label>Slice <select id="slice"></select></label>
+  <label>Measure <select id="measure">
+    <option value="pct">% change</option>
+    <option value="log2">log&#8322; ratio</option>
+  </select></label>
   <label id="sameYLabel"><input type="checkbox" id="sameY"> Same y-axis for all panels</label>
+  <span id="silentNote" hidden>&#9660; at a panel's foot: 0&nbsp;Hz under that pattern (log&#8322; = &minus;&infin;)</span>
   <span id="status"></span>
   <span id="excludedNote" hidden>Channels in <b>red</b> were excluded (grounded, stimulating, or 0&nbsp;Hz at baseline); run <code>--list</code> for which</span>
 </header>
@@ -66,6 +72,8 @@
   const C = payload.colors;
   const sliceSel = document.getElementById("slice");
   const sameYBox = document.getElementById("sameY");
+  const measureSel = document.getElementById("measure");
+  const silentNote = document.getElementById("silentNote");
   const sameYLabel = document.getElementById("sameYLabel");
   const status = document.getElementById("status");
   const plotEl = document.getElementById("plot");
@@ -82,9 +90,15 @@
   const LEGEND_LIFT = 30;   // px above the plot area, clear of the panel titles
   const TITLE_STANDOFF = 14; // px between an axis title and its value labels
 
-  const HOVER = "%{customdata[0]} · Channel %{customdata[1]}<br>"
-              + "%{customdata[2]}: %{customdata[3]:+.4~g}%<br>"
-              + "prestim %{customdata[4]:.4~g} Hz → stim %{customdata[5]:.4~g} Hz<extra></extra>";
+  const HOVER_TAIL = "prestim %{customdata[4]:.4~g} Hz → stim %{customdata[5]:.4~g} Hz<extra></extra>";
+  const HOVER = {
+    pct: "%{customdata[0]} · Channel %{customdata[1]}<br>"
+         + "%{customdata[2]}: %{customdata[3]:+.4~g}%<br>" + HOVER_TAIL,
+    log2: "%{customdata[0]} · Channel %{customdata[1]}<br>"
+          + "%{customdata[2]}: log₂ %{customdata[6]:+.3~g} (%{customdata[3]:+.4~g}%)<br>" + HOVER_TAIL,
+    silent: "%{customdata[0]} · Channel %{customdata[1]}<br>"
+            + "%{customdata[2]}: silent, log₂ = −∞ (−100%)<br>" + HOVER_TAIL,
+  };
 
   document.title = "Firing rate difference from baseline: " + payload.csv;
   if (payload.runs.length) {
@@ -135,16 +149,24 @@
 
   // A percentage is already normalised, so one shared range keeps a +10% slice
   // from looking like a +900% one.
-  function yRangeFor(values) {
+  // `values` holds only finite numbers; `floor` asks for a band below them for
+  // the log2 view's -inf readings, which are drawn at the range's lower edge.
+  function yRangeFor(values, log, floor) {
     let lo = 0, hi = 0;
     if (values.length) {
       for (const v of values) { if (v < lo) lo = v; if (v > hi) hi = v; }
     } else {
-      lo = -100; hi = 100;
+      lo = log ? -1 : -100; hi = log ? 1 : 100;
     }
     const pad = 0.08 * ((hi - lo) || 1);
-    return [lo - pad, hi + pad];
+    return [lo - pad * (floor ? 2.5 : 1), hi + pad];
   }
+
+  // What a point plots at under the current measure: a number, or null for a
+  // log2 of -inf (a 0 Hz reading), which has no position on the axis.
+  function yOf(pt, log) { return log ? pt.l : pt.p; }
+
+  function fmtLog(v) { return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(2); }
 
   function fmtPct(v) {
     return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(Math.abs(v) < 10 ? 1 : 0) + "%";
@@ -176,12 +198,15 @@
 
     // One shared y-axis unless the box is unticked, in which case each panel
     // scales to its own data.
+    const log = measureSel.value === "log2";
+    const finite = pts => pts.map(pt => yOf(pt, log)).filter(v => v !== null);
+    const anySilent = pts => log && pts.some(pt => pt.l === null);
     let shared = null;
     if (sameYBox.checked) {
-      const values = [];
-      for (const p of panels) for (const pt of p.points) values.push(pt.p);
-      shared = yRangeFor(values);
+      const all = panels.flatMap(p => p.points);
+      shared = yRangeFor(finite(all), log, anySilent(all));
     }
+    let silentShown = false;
 
     const traces = [];
     const annotations = [];
@@ -193,7 +218,9 @@
       const row = Math.floor(i / nCols), col = i % nCols;
       const chans = panel.channels;
       const pos = new Map(chans.map((c, j) => [c, j]));
-      const range = shared || yRangeFor(panel.points.map(p => p.p));
+      const range = shared || yRangeFor(finite(panel.points), log, anySilent(panel.points));
+      // A -inf reading sits in the band below the lowest finite value.
+      const floorY = range[0] + 0.04 * (range[1] - range[0]);
 
       // Re-seeded per panel so a slice's dots land in the same places in the
       // grid and in the single-slice view.
@@ -201,17 +228,35 @@
       for (const token of payload.stims) {
         const pts = panel.points.filter(p => p.t === token);
         if (!pts.length) continue;
+        // Jitter is drawn for every point in both measures, so a dot keeps its
+        // x position when the measure is switched.
+        const jitter = pts.map(() => rand() * 0.36 - 0.18);
+        const onAxis = pts.map((p, k) => [p, jitter[k]]).filter(([p]) => yOf(p, log) !== null);
+        const silent = pts.map((p, k) => [p, jitter[k]]).filter(([p]) => yOf(p, log) === null);
+        const custom = p => [panel.title, p.c, payload.labels[p.t], p.p, p.b, p.s, p.l];
         const show = !legendSeen.has(token);
         legendSeen.add(token);
         traces.push({
           type: "scatter", mode: "markers",
           name: payload.labels[token], legendgroup: token, showlegend: show,
-          x: pts.map(p => pos.get(p.c) + (rand() * 0.36 - 0.18)), y: pts.map(p => p.p),
+          x: onAxis.map(([p, j]) => pos.get(p.c) + j), y: onAxis.map(([p]) => yOf(p, log)),
           marker: { size: 6, color: C.stim[token], opacity: 0.8 },
-          customdata: pts.map(p => [panel.title, p.c, payload.labels[p.t], p.p, p.b, p.s]),
-          hovertemplate: HOVER,
+          customdata: onAxis.map(([p]) => custom(p)),
+          hovertemplate: log ? HOVER.log2 : HOVER.pct,
           xaxis: "x" + s, yaxis: "y" + s,
         });
+        if (silent.length) {
+          silentShown = true;
+          traces.push({
+            type: "scatter", mode: "markers",
+            name: payload.labels[token], legendgroup: token, showlegend: false,
+            x: silent.map(([p, j]) => pos.get(p.c) + j), y: silent.map(() => floorY),
+            marker: { size: 7, symbol: "triangle-down", color: C.stim[token], opacity: 0.8 },
+            customdata: silent.map(([p]) => custom(p)),
+            hovertemplate: HOVER.silent,
+            xaxis: "x" + s, yaxis: "y" + s,
+          });
+        }
       }
 
       // Ticks thin out in the grid so the labels stay readable, but an excluded
@@ -248,9 +293,9 @@
       layout["yaxis" + s] = Object.assign({
         domain: ydom[row], anchor: "x" + s, range: range,
         gridcolor: C.grid, zeroline: true, zerolinecolor: C.zeroLine, zerolinewidth: 1,
-        tickfont: { size: single ? 10 : 9 }, ticksuffix: "%",
+        tickfont: { size: single ? 10 : 9 }, ticksuffix: log ? "" : "%",
         showline: true, linecolor: C.grid, ticks: "outside", tickcolor: C.grid,
-      }, col === 0 ? { title: { text: payload.text.y, font: { size: 11 },
+      }, col === 0 ? { title: { text: log ? payload.text.yLog2 : payload.text.y, font: { size: 11 },
                                 standoff: TITLE_STANDOFF } } : {});
 
       // Only the grid needs these: with one panel the drop-down already names
@@ -283,7 +328,8 @@
       displaylogo: false, modeBarButtonsToRemove: ["select2d", "lasso2d"],
       toImageButtonOptions: {
         format: "png", scale: initial.scale,
-        filename: ("fr_diff_" + (sel === allSlices ? "all" : sel)).replace(/[^\w-]+/g, "_"),
+        filename: ("fr_diff_" + (sel === allSlices ? "all" : sel) + (log ? "_log2" : ""))
+          .replace(/[^\w-]+/g, "_"),
       },
     };
     Plotly.react("plot", traces, layout, config);
@@ -296,17 +342,23 @@
     // Math.min(...array) can take as arguments.
     let lo = Infinity, hi = -Infinity;
     for (const p of panels) for (const q of p.points) {
-      if (q.p < lo) lo = q.p;
-      if (q.p > hi) hi = q.p;
+      const v = yOf(q, log);
+      if (v === null) continue;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
     }
-    if (lo <= hi) msg += "   |   range " + fmtPct(lo) + " … " + fmtPct(hi);
+    const fmt = log ? fmtLog : fmtPct;
+    if (lo <= hi) msg += "   |   range " + fmt(lo) + " … " + fmt(hi) + (log ? " (log₂)" : "");
     status.textContent = msg;
+    silentNote.hidden = !silentShown;
   }
 
   fill(sliceSel, [[allSlices, allSlices]].concat(payload.panels.map(p => [p.id, p.title])),
        initial.slice);
   sameYBox.checked = initial.sameY;
+  measureSel.value = initial.measure === "log2" ? "log2" : "pct";
   sliceSel.addEventListener("change", render);
+  measureSel.addEventListener("change", render);
   sameYBox.addEventListener("change", render);
   let resizeTimer = null;
   window.addEventListener("resize", () => {

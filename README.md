@@ -28,7 +28,7 @@ The baseline is the `_prestim` recording; the stimulation patterns are `_stim1` 
 
 Only complete experiments are plotted: a slice needs its `_prestim` recording and all four patterns. A slice missing any of them, or with a condition recorded twice (e.g. at two DIVs), gets no panel. `--list` reports which slices were plotted and why the rest were not.
 
-The viewer is one HTML file: a panel per slice, laid out as a grid so every slice can be scanned at once, with a dropdown that zooms into a single slice full width. Each panel plots the percentage difference against channel, one colour per stimulation pattern, sharing one y-axis so a +10% slice cannot be mistaken for a +900% one (untick the box, or pass `--per-panel-y`, to let each panel scale to its own data). Clicking a legend entry hides that pattern in every panel at once.
+The viewer is one HTML file: a panel per slice, laid out as a grid so every slice can be scanned at once, with a dropdown that zooms into a single slice full width. Each panel plots the percentage difference against channel, one colour per stimulation pattern, sharing one y-axis so a +10% slice cannot be mistaken for a +900% one (untick the box, or pass `--per-panel-y`, to let each panel scale to its own data). Clicking a legend entry hides that pattern in every panel at once. A **Measure** dropdown (or `--log2`) switches the y-axis to log₂(stim / prestim), which treats halving and doubling symmetrically; a 0 Hz stim reading (log₂ = −∞) is drawn as a ▼ at the foot of its panel.
 
 Some readings say nothing about the organoid. Channels listed in `GROUNDED_CHANNELS` (channel 15 in every experiment) are left out of every recording; channels listed under a pattern in `STIMULATED_CHANNELS` (21, 31, 41, 51, 61 and 71, under every pattern) are left out of that pattern only; and a channel with a 0 Hz baseline has no percentage to compute. A channel left with no point is printed in red along that panel's x-axis, and `--list` names it with the reason. A channel that falls silent under stimulation is *not* assumed to be the stimulating electrode: it is plotted at −100%.
 
@@ -37,6 +37,7 @@ python3 fr_diff.py NeuronalActivity_NodeLevel.csv        # interactive viewer (o
 python3 fr_diff.py data.csv --list                       # which slices were plotted, and why the rest were not
 python3 fr_diff.py data.csv -o diff.html                 # write the viewer to a file to share
 python3 fr_diff.py data.csv --slice CT1A -o diff.html    # open on one slice instead of the grid
+python3 fr_diff.py data.csv --log2 -o diff.html          # open on log2(stim / prestim) instead of %
 ```
 
 Needs `fr_boxplots.py` beside it — it shares that script's CSV reader and file-name grammar — and its page template in `viewers/`, but unlike `fr_boxplots.py` it does not need matplotlib.
