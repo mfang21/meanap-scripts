@@ -30,8 +30,8 @@ Rows are otherwise passed through untouched and in the order given: no
 de-duplication, no reordering, no rewriting of values.
 
 Usage:
-    python3 merge_csv.py base.csv stim1.csv stim3.csv
-    python3 merge_csv.py stimLR.csv stimRL.csv -o combined.csv
+    python3 merge_csv.py file1.csv file2.csv file3.csv
+    python3 merge_csv.py file1.csv file2.csv -o combined.csv
 
 OUTPUT may be:
     omitted                   -> <first_input_dir>/NeuronalActivity_NodeLevel_base_stim_merged.csv
