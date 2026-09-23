@@ -550,9 +550,7 @@ def build_payload(panels: list[Panel], csv_name: str) -> dict:
                         "b": d.base_fr, "s": d.stim_fr} for d in p.diffs],
             "excluded": p.unplotted,
             "missingBase": p.missing_base,
-            "n": {"paired": len({d.channel for d in p.diffs}),
-                  "excluded": len(p.unplotted),
-                  "missingBase": len(p.missing_base)},
+            "n": {"missingBase": len(p.missing_base)},
         } for p in panels],
     }
 

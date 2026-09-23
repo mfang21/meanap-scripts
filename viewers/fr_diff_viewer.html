@@ -34,7 +34,7 @@
     margin: 16px; padding: 12px 16px; border: 1px solid var(--excluded); border-radius: 6px;
     background: #fff5f5; color: #8a1f1f;
   }
-  #excludedNote { color: var(--muted); font-size: 12px; }
+  #excludedNote { color: var(--muted); font-size: 12px; flex: 1 0 100%; text-align: center; }
   #excludedNote b { color: var(--excluded); }
 </style>
 </head>
@@ -43,8 +43,8 @@
   <div id="runTitle" class="run-title" hidden></div>
   <label>Slice <select id="slice"></select></label>
   <label id="sameYLabel"><input type="checkbox" id="sameY"> Same y-axis for all panels</label>
-  <span id="excludedNote" hidden>channels in <b>red</b> were excluded (grounded, stimulating, or 0&nbsp;Hz at baseline); run <code>--list</code> for which</span>
   <span id="status"></span>
+  <span id="excludedNote" hidden>Channels in <b>red</b> were excluded (grounded, stimulating, or 0&nbsp;Hz at baseline); run <code>--list</code> for which</span>
 </header>
 <div id="banner" hidden>
   Could not load the Plotly.js charting library from cdn.plot.ly. This viewer needs an
@@ -288,11 +288,8 @@
     };
     Plotly.react("plot", traces, layout, config);
 
-    const paired = panels.reduce((a, p) => a + p.n.paired, 0);
-    const excluded = panels.reduce((a, p) => a + p.n.excluded, 0);
     const stimOnly = panels.reduce((a, p) => a + p.n.missingBase, 0);
-    const parts = [n + (n === 1 ? " slice" : " slices"), paired + " channels paired"];
-    if (excluded) parts.push(excluded + " excluded");
+    const parts = [n + (n === 1 ? " slice" : " slices")];
     if (stimOnly) parts.push(stimOnly + " stim-only");
     let msg = parts.join(" · ");
     // Folded rather than spread: a big file holds more percentages than

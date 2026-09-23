@@ -336,11 +336,9 @@ class Payload(unittest.TestCase):
         self.assertEqual(len(ids), len(set(ids)))
         self.assertIn("R250929/CT1A", ids)
 
-    def test_the_counts_agree_with_the_arrays(self):
+    def test_the_stim_only_count_agrees_with_its_array(self):
         _, payload = self.build()
         for p in payload["panels"]:
-            self.assertEqual(p["n"]["paired"], len({q["c"] for q in p["points"]}))
-            self.assertEqual(p["n"]["excluded"], len(p["excluded"]))
             self.assertEqual(p["n"]["missingBase"], len(p["missingBase"]))
 
     def test_an_excluded_channel_is_carried_as_a_bare_channel_number(self):
