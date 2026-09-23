@@ -113,7 +113,8 @@ STIM_COLORS = dict(zip(STIM_LABELS, PALETTE))
 # Electrodes whose readings are not the organoid's. A grounded channel is left
 # out of every recording; a stimulating channel only out of the pattern that
 # drove it (condition token -> channels). Channel 15 is grounded in every
-# experiment. The stimulating electrodes of each pattern are not filled in yet.
+# experiment. The stimulating electrodes of each pattern are not filled in yet
+# (mfang21/meanap-scripts#2).
 GROUNDED_CHANNELS: frozenset[int] = frozenset({15})
 STIMULATED_CHANNELS: dict[str, frozenset[int]] = {}
 
@@ -337,7 +338,7 @@ def _classify(panel: Panel, channel: int, base_fr: float,
         panel.excluded.append(Excluded(channel, EXCLUDED_GROUNDED, base_fr, readings))
         return
     # TODO: a 0 Hz baseline is taken to mean an electrode that recorded nothing;
-    # whether any are really silent-then-recruited channels is still open.
+    # whether any are really silent-then-recruited channels is still open (#3).
     if base_fr == 0:
         panel.excluded.append(Excluded(channel, EXCLUDED_ZERO_BASE, base_fr, readings))
         return
