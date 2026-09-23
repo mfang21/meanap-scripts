@@ -50,11 +50,15 @@ python3 merge_csv.py stimLR.csv stimRL.csv -o combined.csv
 ```
 
 ### `grp_filter.py`
-Removes rows whose `Grp` value starts with `C` (e.g. `CCTL`, `CMOS`, `CMUT`) from a CSV. Lists the rows to be dropped and asks for confirmation before writing a new file; the input is never modified.
+Keeps or drops rows of a CSV by their `Grp` value. `--grp` is a keep list — `--grp PreStim` keeps only those rows and discards everything else — while `--drop` and `--drop-prefix` are drop lists, by exact value and by leading characters respectively. The two drop flags may be combined and the union is removed, but neither may be combined with `--grp`. All three take several values, comma-separated (`--drop a,b`) or by repeating the flag (`--drop a --drop b`). Matching ignores case and surrounding whitespace; `--grp` and `--drop` match the whole value, so `prestim` matches `PreStim` but not `prestim2`.
+
+`--list` prints each distinct `Grp` value with its row count and exits — worth running first. Before anything is written, a per-`Grp` summary of what is kept and what is dropped is printed along with the recordings being lost, and confirmation is asked for; the input is never modified. Passing no selection flag is an error rather than a default, so nothing is filtered by accident.
 
 ```
-python3 grp_filter.py input.csv
-python3 grp_filter.py input.csv -o filtered.csv
+python3 grp_filter.py input.csv --list                            # distinct Grp values and row counts
+python3 grp_filter.py input.csv --grp PreStim,PostStim            # keep only these groups
+python3 grp_filter.py input.csv --drop CCTL --drop-prefix B       # drop the union of both
+python3 grp_filter.py input.csv --drop-prefix C -o filtered.csv   # the old CCTL/CMOS/CMUT behaviour
 ```
 
 ### `assess_normality.R`
