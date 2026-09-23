@@ -196,6 +196,43 @@ class CheckDuplicates(unittest.TestCase):
             [table("base.csv", BASE_CSV + ",BCTL,9,9.0\n"), table("stim1.csv", blank)]))
 
 
+class CheckRecordings(unittest.TestCase):
+    def test_distinct_recordings_pass(self):
+        tables = [table("base.csv", BASE_CSV), table("stim1.csv", STIM1_CSV),
+                  table("stim3.csv", STIM3_CSV)]
+        self.assertIsNone(mc.check_recordings(tables))
+
+    def test_a_channel_repeated_within_a_recording_is_rejected(self):
+        doubled = BASE_CSV + "R250929CT7A_DIV250_base,BCTL,2,9.9\n"
+        with self.assertRaises(SystemExit) as cm:
+            mc.check_recordings([table("base.csv", doubled)])
+        message = str(cm.exception)
+        self.assertIn("more than one row", message)
+        self.assertIn("R250929CT7A_DIV250_base, channel 2", message)
+
+    def test_the_same_slice_and_condition_at_two_divs_is_rejected(self):
+        other_div = HEADER + "R250929CT7A_DIV251_base,BCTL,6,9.0\n"
+        with self.assertRaises(SystemExit) as cm:
+            mc.check_recordings([table("base.csv", BASE_CSV), table("late.csv", other_div)])
+        message = str(cm.exception)
+        self.assertIn("more than one DIV", message)
+        self.assertIn("R250929CT7A_DIV250_base / R250929CT7A_DIV251_base", message)
+
+    def test_two_divs_within_one_file_are_rejected_too(self):
+        mixed = BASE_CSV + "R250929MO1A_DIV251_base,BMOS,1,2.0\n"
+        with self.assertRaises(SystemExit):
+            mc.check_recordings([table("base.csv", mixed)])
+
+    def test_other_conditions_of_the_slice_are_not_a_clash(self):
+        tables = [table("base.csv", BASE_CSV),
+                  table("stim1.csv", HEADER + "R250929CT7A_DIV251_stim1,BCTL,1,3.5\n")]
+        self.assertIsNone(mc.check_recordings(tables))
+
+    def test_without_a_channel_column_only_the_div_check_runs(self):
+        text = "FileName,FR\nR250929CT7A_DIV250_base,1\nR250929CT7A_DIV250_base,2\n"
+        self.assertIsNone(mc.check_recordings([table("a.csv", text)]))
+
+
 class ResolveOutputPath(unittest.TestCase):
     def test_default_name_beside_the_first_input(self):
         inputs = [Path("/data/run/base.csv"), Path("/data/run/stim1.csv")]
@@ -284,6 +321,14 @@ class Cli(unittest.TestCase):
                                 stim1=STIM1_CSV.replace("R250929", "R250930"))
             proc = self.run_cli(tmp, *map(str, paths), expect_ok=False)
             self.assertIn("not from the same run", proc.stderr)
+            self.assertFalse((Path(tmp) / mc.DEFAULT_NAME).exists())
+
+    def test_a_recording_at_two_divs_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_files(tmp, base=BASE_CSV,
+                                late=HEADER + "R250929CT7A_DIV251_base,BCTL,6,9.0\n")
+            proc = self.run_cli(tmp, *map(str, paths), expect_ok=False)
+            self.assertIn("more than one DIV", proc.stderr)
             self.assertFalse((Path(tmp) / mc.DEFAULT_NAME).exists())
 
     def test_the_same_path_twice_is_rejected(self):

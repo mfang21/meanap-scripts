@@ -3,7 +3,7 @@
 
 Written for combining the per-condition node-level exports of one run
 
-Any number of CSVs can be given. Nothing is written until three checks pass:
+Any number of CSVs can be given. Nothing is written until four checks pass:
 
     Columns   Every file must carry the same set of columns, compared without
               regard to case or order. The merged file uses the first file's
@@ -18,6 +18,13 @@ Any number of CSVs can be given. Nothing is written until three checks pass:
               within a file once per channel, which is expected, but the same
               FileName in two files means the inputs overlap and that
               recording's rows would be doubled.
+
+    Recordings  No recording may be present twice under any guise: the same
+              FileName and Channel on two rows (checked when there is a Channel
+              column), or two FileNames that differ only in their DIV<n> token,
+              e.g. "R250929CT1A_DIV250_base" and "R250929CT1A_DIV251_base" --
+              the same slice and condition recorded twice, which leaves no way
+              to tell which one a reading belongs with.
 
 Rows are otherwise passed through untouched and in the order given: no
 de-duplication, no reordering, no rewriting of values.
@@ -34,7 +41,7 @@ OUTPUT may be:
 
 Exits 1 if fewer than two inputs are given, an input is missing or empty, the
 columns disagree, the runs disagree, a recording appears in more than one
-input, or the output would overwrite an input.
+input, a recording is present twice, or the output would overwrite an input.
 """
 
 from __future__ import annotations
@@ -50,6 +57,9 @@ DEFAULT_NAME = "NeuronalActivity_NodeLevel_base_stim_merged.csv"
 
 # Column names are matched case-insensitively (the user's file may say "filename").
 COL_FILENAME = "filename"
+COL_CHANNEL = "channel"
+
+MAX_LISTED = 10                    # offending names listed per error before "... and N more"
 
 
 def normalize(column: str) -> str:
@@ -187,6 +197,55 @@ def check_duplicates(tables: list[Table]) -> None:
         sys.exit("\n".join(lines))
 
 
+def recording_key(filename: str) -> str:
+    """The file name with its DIV<n> token blanked out.
+
+    Two file names that agree on this name the same slice under the same
+    condition, recorded on different days.
+    """
+    return re.sub(r"DIV\d*", "DIV", filename)
+
+
+def check_recordings(tables: list[Table]) -> None:
+    """Exit if a recording is present twice, within one file or across several.
+
+    Two forms are caught: a FileName + Channel pair on more than one row, and
+    two FileNames that differ only in their DIV<n> token. Either way a reader
+    downstream would have two readings for one channel of one recording.
+    """
+    repeated: dict[tuple[str, str], int] = {}       # (FileName, Channel) -> rows
+    names_of: dict[str, set[str]] = {}              # recording_key -> FileNames
+
+    for t in tables:
+        name_col = t.column(COL_FILENAME)
+        has_channel = any(normalize(c) == COL_CHANNEL for c in t.fieldnames)
+        channel_col = t.column(COL_CHANNEL) if has_channel else None
+        for row in t.rows:
+            name = (row[name_col] or "").strip()
+            if not name:
+                continue
+            names_of.setdefault(recording_key(name), set()).add(name)
+            if channel_col is not None:
+                key = (name, (row[channel_col] or "").strip())
+                repeated[key] = repeated.get(key, 0) + 1
+
+    lines: list[str] = []
+    if twice := sorted(k for k, n in repeated.items() if n > 1):
+        lines.append(f"Error: {len(twice)} channel(s) appear on more than one row "
+                     f"of the same recording:")
+        lines += [f"         {name}, channel {ch}" for name, ch in twice[:MAX_LISTED]]
+        if len(twice) > MAX_LISTED:
+            lines.append(f"         ... and {len(twice) - MAX_LISTED} more")
+    if clashes := sorted(sorted(v) for v in names_of.values() if len(v) > 1):
+        lines.append(f"Error: {len(clashes)} recording(s) are present under more than "
+                     f"one DIV (same slice and condition):")
+        lines += [f"         {' / '.join(names)}" for names in clashes[:MAX_LISTED]]
+        if len(clashes) > MAX_LISTED:
+            lines.append(f"         ... and {len(clashes) - MAX_LISTED} more")
+    if lines:
+        sys.exit("\n".join(lines))
+
+
 def resolve_output_path(inputs: list[Path], output: Path | None) -> Path:
     if output is None:
         path = inputs[0].parent / DEFAULT_NAME
@@ -241,6 +300,7 @@ def main():
     header = check_headers(tables)
     run = check_runs(tables)
     check_duplicates(tables)
+    check_recordings(tables)
 
     print(f"Merging {len(tables)} files from run {run}:")
     for t in tables:
