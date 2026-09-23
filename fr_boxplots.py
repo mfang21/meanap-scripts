@@ -85,10 +85,6 @@ COL_GRP = "grp"
 COL_CHANNEL = "channel"
 COL_FR = "fr"
 
-# Group -> marker that precedes the organoid number-letter pair in the file name.
-GROUP_MARKERS = {"BCTL": "CT", "BMOS": "MO", "BMUT": "MT"}
-ALL_MARKERS = tuple(GROUP_MARKERS.values())
-
 ALL_ORGANOIDS = "All organoids"
 ALL_GROUPS = "All groups"          # channel overview across every group
 UNKNOWN = "unknown"
@@ -123,16 +119,18 @@ class Record:
 # Parsing
 # --------------------------------------------------------------------------- #
 
-def parse_organoid(filename: str, grp: str) -> tuple[str, str]:
-    """Return (organoid, slice) parsed from a file name, or (UNKNOWN, UNKNOWN)."""
-    marker = GROUP_MARKERS.get(grp.upper())
-    markers = (marker,) if marker else ALL_MARKERS
-    pattern = r"(?<![A-Za-z])(%s)(\d+)([A-Za-z])(?![A-Za-z])" % "|".join(markers)
-    m = re.search(pattern, filename)
+def parse_organoid(filename: str) -> tuple[str, str]:
+    """Return (organoid, slice) parsed from a file name, or (UNKNOWN, UNKNOWN).
+
+    The slice is the token fused onto the run ID: "R250929MO7B_DIV250_stim1"
+    gives ("MO7", "MO7B"). It comes from the file name alone, never from Grp,
+    whose spelling varies between exports of the same organoid (CTL, BCTL, ...).
+    """
+    m = re.match(r"R\d+([A-Za-z]+\d+)([A-Za-z])(?=_|$)", filename)
     if not m:
         return UNKNOWN, UNKNOWN
-    prefix, number, letter = m.group(1), m.group(2), m.group(3).upper()
-    return f"{prefix}{number}", f"{prefix}{number}{letter}"
+    organoid, letter = m.group(1), m.group(2).upper()
+    return organoid, f"{organoid}{letter}"
 
 
 def parse_stim(filename: str) -> str | None:
@@ -201,7 +199,7 @@ def load_records(csv_path: Path) -> list[Record]:
             skipped_channel += 1
             continue
 
-        organoid, slc = parse_organoid(filename, grp)
+        organoid, slc = parse_organoid(filename)
         if organoid == UNKNOWN:
             unknown_files.add(filename)
         records.append(Record(filename, grp, channel, fr, organoid, slc,

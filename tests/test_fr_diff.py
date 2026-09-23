@@ -22,7 +22,7 @@ HEADER = "FileName,Grp,Channel,FR\n"
 
 def rec(filename, grp, channel, fr):
     """A Record built the way load_records() builds one, through the real parsers."""
-    organoid, slc = fb.parse_organoid(filename, grp)
+    organoid, slc = fb.parse_organoid(filename)
     return fb.Record(filename, grp, channel, fr, organoid, slc, fb.parse_stim(filename))
 
 

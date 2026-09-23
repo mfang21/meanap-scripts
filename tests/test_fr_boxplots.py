@@ -15,7 +15,7 @@ import fr_boxplots as fb
 
 
 def rec(filename, grp, channel, fr):
-    organoid, slc = fb.parse_organoid(filename, grp)
+    organoid, slc = fb.parse_organoid(filename)
     return fb.Record(filename, grp, channel, fr, organoid, slc, fb.parse_stim(filename))
 
 
@@ -33,16 +33,20 @@ RECORDS = [
 
 class ParseOrganoid(unittest.TestCase):
     def test_docstring_example(self):
-        self.assertEqual(fb.parse_organoid("R250929CT7A_DIV250", "BCTL"), ("CT7", "CT7A"))
+        self.assertEqual(fb.parse_organoid("R250929MO7B_DIV250_stim1"), ("MO7", "MO7B"))
 
     def test_lowercase_slice_letter_is_uppercased(self):
-        self.assertEqual(fb.parse_organoid("R250929MO12b_DIV250", "BMOS"), ("MO12", "MO12B"))
+        self.assertEqual(fb.parse_organoid("R250929MO12b_DIV250"), ("MO12", "MO12B"))
 
-    def test_unknown_group_tries_every_marker(self):
-        self.assertEqual(fb.parse_organoid("R250929MT3A_DIV250", "WHAT"), ("MT3", "MT3A"))
+    def test_any_marker_is_read_from_the_file_name(self):
+        self.assertEqual(fb.parse_organoid("R250929XY3A_DIV250_base"), ("XY3", "XY3A"))
+
+    def test_the_slice_must_follow_the_run_id(self):
+        self.assertEqual(fb.parse_organoid("CT7A_DIV250_base"), (fb.UNKNOWN, fb.UNKNOWN))
+        self.assertEqual(fb.parse_organoid("R250929_CT7A_DIV250"), (fb.UNKNOWN, fb.UNKNOWN))
 
     def test_no_match(self):
-        self.assertEqual(fb.parse_organoid("nothing_here", "BCTL"), (fb.UNKNOWN, fb.UNKNOWN))
+        self.assertEqual(fb.parse_organoid("nothing_here"), (fb.UNKNOWN, fb.UNKNOWN))
 
 
 class ParseRunName(unittest.TestCase):
