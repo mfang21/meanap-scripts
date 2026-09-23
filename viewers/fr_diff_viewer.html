@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Firing rate difference from baseline</title>
 <style>
-  :root { --ink: #0b0b0b; --muted: #52514e; --line: #e4e3df; --grounded: #e34948; }
+  :root { --ink: #0b0b0b; --muted: #52514e; --line: #e4e3df; --excluded: #e34948; }
   /* The vertical scrollbar's gutter is reserved even when the page is short.
      Without it a tall grid brings the scrollbar in only after Plotly has sized
      itself to the full window, leaving the figure a scrollbar too wide and the
@@ -31,11 +31,11 @@
   header > * { min-width: 0; }
   #plot { min-height: 320px; padding: 0 16px; box-sizing: border-box; max-width: 100%; }
   #banner {
-    margin: 16px; padding: 12px 16px; border: 1px solid var(--grounded); border-radius: 6px;
+    margin: 16px; padding: 12px 16px; border: 1px solid var(--excluded); border-radius: 6px;
     background: #fff5f5; color: #8a1f1f;
   }
-  #groundedNote { color: var(--muted); font-size: 12px; }
-  #groundedNote b { color: var(--grounded); }
+  #excludedNote { color: var(--muted); font-size: 12px; }
+  #excludedNote b { color: var(--excluded); }
 </style>
 </head>
 <body>
@@ -43,7 +43,7 @@
   <div id="runTitle" class="run-title" hidden></div>
   <label>Slice <select id="slice"></select></label>
   <label id="sameYLabel"><input type="checkbox" id="sameY"> Same y-axis for all panels</label>
-  <span id="groundedNote" hidden>channels in <b>red</b> were grounded or stimulated</span>
+  <span id="excludedNote" hidden>channels in <b>red</b> were excluded (grounded, stimulating, or 0&nbsp;Hz at baseline); run <code>--list</code> for which</span>
   <span id="status"></span>
 </header>
 <div id="banner" hidden>
@@ -84,7 +84,7 @@
 
   const HOVER = "%{customdata[0]} · Channel %{customdata[1]}<br>"
               + "%{customdata[2]}: %{customdata[3]:+.4~g}%<br>"
-              + "base %{customdata[4]:.4~g} Hz → stim %{customdata[5]:.4~g} Hz<extra></extra>";
+              + "prestim %{customdata[4]:.4~g} Hz → stim %{customdata[5]:.4~g} Hz<extra></extra>";
 
   document.title = "Firing rate difference from baseline: " + payload.csv;
   if (payload.runs.length) {
@@ -92,7 +92,7 @@
     el.textContent = (payload.runs.length === 1 ? "Run: " : "Runs: ") + payload.runs.join(", ");
     el.hidden = false;
   }
-  document.getElementById("groundedNote").hidden = !payload.panels.some(p => p.grounded.length);
+  document.getElementById("excludedNote").hidden = !payload.panels.some(p => p.excluded.length);
 
   // The figure is given an explicit width rather than left to autosize, so it
   // can never end up wider than the column it sits in. clientWidth counts the
@@ -214,20 +214,20 @@
         });
       }
 
-      // Ticks thin out in the grid so the labels stay readable, but a grounded
+      // Ticks thin out in the grid so the labels stay readable, but an excluded
       // channel always keeps its tick: the red number is the only thing marking
       // it, since it has no point to plot.
-      const grounded = new Set(panel.grounded);
+      const excluded = new Set(panel.excluded);
       const budget = single ? chans.length : (nCols <= 2 ? 16 : 10);
       const step = Math.max(1, Math.ceil(chans.length / budget));
-      // The grounded ticks go in first and a regular tick yields to one it would
+      // The excluded ticks go in first and a regular tick yields to one it would
       // collide with, so a red number never ends up overprinted by its neighbour.
-      const keep = new Set(grounded);
+      const keep = new Set(excluded);
       const clearance = step > 1 ? Math.max(1, Math.floor(step / 2)) : 0;
-      const groundedAt = chans.map((c, j) => grounded.has(c) ? j : -1).filter(j => j >= 0);
+      const excludedAt = chans.map((c, j) => excluded.has(c) ? j : -1).filter(j => j >= 0);
       chans.forEach((c, j) => {
         if (keep.has(c) || j % step !== 0) return;
-        if (groundedAt.some(g => Math.abs(g - j) <= clearance)) return;
+        if (excludedAt.some(g => Math.abs(g - j) <= clearance)) return;
         keep.add(c);
       });
       const shown = chans.filter(c => keep.has(c));
@@ -237,8 +237,8 @@
       layout["xaxis" + s] = Object.assign({
         domain: xdom[col], anchor: "y" + s,
         tickmode: "array", tickvals: shown.map(c => pos.get(c)),
-        ticktext: shown.map(c => grounded.has(c)
-          ? '<span style="color:' + C.grounded + '">' + c + "</span>" : String(c)),
+        ticktext: shown.map(c => excluded.has(c)
+          ? '<span style="color:' + C.excluded + '">' + c + "</span>" : String(c)),
         range: [-0.7, chans.length - 0.3], tickangle: crowded ? -90 : 0,
         tickfont: { size: single ? 10 : 9 }, showgrid: false,
         showline: true, linecolor: C.grid, zeroline: false, ticks: "outside", tickcolor: C.grid,
@@ -289,10 +289,10 @@
     Plotly.react("plot", traces, layout, config);
 
     const paired = panels.reduce((a, p) => a + p.n.paired, 0);
-    const grounded = panels.reduce((a, p) => a + p.n.grounded, 0);
+    const excluded = panels.reduce((a, p) => a + p.n.excluded, 0);
     const stimOnly = panels.reduce((a, p) => a + p.n.missingBase, 0);
     const parts = [n + (n === 1 ? " slice" : " slices"), paired + " channels paired"];
-    if (grounded) parts.push(grounded + " grounded or stimulated");
+    if (excluded) parts.push(excluded + " excluded");
     if (stimOnly) parts.push(stimOnly + " stim-only");
     let msg = parts.join(" · ");
     // Folded rather than spread: a big file holds more percentages than

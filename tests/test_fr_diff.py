@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -18,12 +19,35 @@ import fr_diff as fd
 SAMPLE_CSV = Path(__file__).resolve().parent / "sample-files" / "NeuronalActivity_NodeLevel_sample.csv"
 
 HEADER = "FileName,Grp,Channel,FR\n"
+STIMS = fd.REQUIRED_STIMS
 
 
 def rec(filename, grp, channel, fr):
     """A Record built the way load_records() builds one, through the real parsers."""
     organoid, slc = fb.parse_organoid(filename)
     return fb.Record(filename, grp, channel, fr, organoid, slc, fb.parse_stim(filename))
+
+
+def full_set(stem="R250929CT1A_DIV250", grp="CTL", base=None, stims=None, skip=()):
+    """Rows of one complete slice: a prestim plus every pattern.
+
+    `base` maps channel -> baseline FR (default {1: 2.0}); `stims` maps a token
+    to {channel: FR}, and any pattern it leaves out reads 3.0 on every baseline
+    channel. Tokens in `skip` are left out entirely, making the set incomplete.
+    """
+    base = {1: 2.0} if base is None else base
+    stims = stims or {}
+    rows = [(f"{stem}_prestim", grp, c, fr) for c, fr in base.items()]
+    for t in STIMS:
+        if t in skip:
+            continue
+        for c, fr in stims.get(t, {c: 3.0 for c in base}).items():
+            rows.append((f"{stem}_{t}", grp, c, fr))
+    return rows
+
+
+def recs(rows):
+    return [rec(*r) for r in rows]
 
 
 def panels_of(records):
@@ -39,25 +63,25 @@ def write_csv(tmp, name, rows):
     return path
 
 
-PAIRED_ROWS = [
-    ("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-    ("R250929CT1A_DIV250_base", "CTL", 2, 4.0),
-    ("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-    ("R250929CT1A_DIV250_stim1", "CTL", 2, 2.0),
-    ("R250929CT2C_DIV250_base", "CTL", 1, 1.0),
-    ("R250929CT2C_DIV250_stimLR", "CTL", 1, 1.5),
-]
+PAIRED_ROWS = full_set() + full_set("R250929CT2C_DIV250", base={1: 1.0})
 
 
 class ParseRun(unittest.TestCase):
     def test_strips_the_fused_organoid_marker(self):
-        self.assertEqual(fd.parse_run("R250929CT1A_DIV250_base"), "R250929")
+        self.assertEqual(fd.parse_run("R250929CT1A_DIV250_prestim"), "R250929")
 
     def test_malformed_div_segment_still_yields_a_run(self):
         self.assertEqual(fd.parse_run("R250929MO7C_DIV_stim3"), "R250929")
 
     def test_a_name_without_a_run_number_is_unparseable(self):
-        self.assertIsNone(fd.parse_run("CT1A_DIV250_base"))
+        self.assertIsNone(fd.parse_run("CT1A_DIV250_prestim"))
+
+
+class GroupOf(unittest.TestCase):
+    def test_a_prefixed_group_is_the_same_group(self):
+        self.assertEqual(fd.group_of("BCTL"), "CTL")
+        self.assertEqual(fd.group_of("CTL"), "CTL")
+        self.assertEqual(fd.group_of(" bmos "), "MOS")
 
 
 class PctDiff(unittest.TestCase):
@@ -73,157 +97,97 @@ class PctDiff(unittest.TestCase):
     def test_falling_silent_is_minus_a_hundred_percent(self):
         self.assertEqual(fd.pct_diff(3.0, 0.0), -100.0)
 
-    def test_a_baseline_of_zero_has_no_percentage(self):
-        self.assertIsNone(fd.pct_diff(0.0, 5.0))
 
-
-class IsGrounded(unittest.TestCase):
-    def test_a_zero_baseline_grounds_the_channel(self):
-        self.assertTrue(fd.is_grounded(0.0, (("stim1", 3.0),)))
-
-    def test_every_stim_reading_at_zero_grounds_the_channel(self):
-        self.assertTrue(fd.is_grounded(2.0, (("stim1", 0.0), ("stim3", 0.0))))
-
-    def test_one_stim_reading_above_zero_is_enough_to_keep_it(self):
-        self.assertFalse(fd.is_grounded(2.0, (("stim1", 0.0), ("stim3", 0.1))))
-
-    def test_a_live_channel_is_not_grounded(self):
-        self.assertFalse(fd.is_grounded(2.0, (("stim1", 3.0),)))
-
-    def test_a_baseline_with_no_stim_reading_at_all_is_not_grounded(self):
-        self.assertFalse(fd.is_grounded(2.0, ()))
-
-
-class BuildPanels(unittest.TestCase):
-    def test_a_base_and_a_stim_of_one_slice_make_one_panel(self):
-        panels, unpaired = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-        ])
+class Completeness(unittest.TestCase):
+    def test_a_complete_slice_makes_one_panel(self):
+        panels, unpaired = panels_of(recs(full_set()))
         self.assertEqual(unpaired, [])
         self.assertEqual(len(panels), 1)
         self.assertEqual(panels[0].slice, "CT1A")
         self.assertEqual(panels[0].run, "R250929")
-        self.assertEqual([d.pct for d in panels[0].diffs], [50.0])
+        self.assertEqual(panels[0].stims, ["stim1", "stim3", "stimLR", "stimRL"])
+        self.assertEqual({d.pct for d in panels[0].diffs}, {50.0})
 
+    def test_a_slice_missing_a_pattern_is_not_plotted(self):
+        panels, unpaired = panels_of(recs(full_set(skip=("stim3", "stimRL"))))
+        self.assertEqual(panels, [])
+        self.assertEqual(unpaired[0].reason, fd.REASON_INCOMPLETE)
+        self.assertEqual(unpaired[0].missing, ("stim3", "stimRL"))
+
+    def test_a_prestim_only_slice_is_not_plotted(self):
+        panels, unpaired = panels_of(recs(full_set(skip=STIMS)))
+        self.assertEqual(panels, [])
+        self.assertEqual(unpaired[0].reason, fd.REASON_NO_STIM)
+
+    def test_a_stim_only_slice_is_not_plotted(self):
+        rows = [r for r in full_set() if not r[0].endswith("_prestim")]
+        panels, unpaired = panels_of(recs(rows))
+        self.assertEqual(panels, [])
+        self.assertEqual(unpaired[0].reason, fd.REASON_NO_BASE)
+
+    def test_base_is_not_the_baseline(self):
+        rows = [(f.replace("_prestim", "_base"), g, c, v) for f, g, c, v in full_set()]
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            panels, unpaired = fd.build_panels(recs(rows))
+        self.assertEqual(panels, [])
+        self.assertEqual(unpaired[0].reason, fd.REASON_NO_BASE)
+        self.assertIn("base were ignored", buf.getvalue())
+
+    def test_base_beside_prestim_is_ignored(self):
+        rows = full_set() + [("R250929CT1A_DIV250_base", "CTL", 1, 99.0)]
+        panels, _ = panels_of(recs(rows))
+        self.assertEqual({d.base_fr for d in panels[0].diffs}, {2.0})
+
+    def test_an_unknown_condition_is_ignored_with_a_note(self):
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            panels, _ = fd.build_panels(recs(full_set() + [("R250929CT1A_DIV250_drug",
+                                                            "CTL", 1, 3.0)]))
+        self.assertEqual(panels[0].stims, list(STIMS))
+        self.assertIn("drug", buf.getvalue())
+
+
+class Pairing(unittest.TestCase):
     def test_two_slices_of_one_organoid_do_not_pair(self):
-        panels, unpaired = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1B_DIV250_stim1", "CTL", 1, 3.0),
-        ])
+        rows = [r for r in full_set() if r[0].endswith("_prestim")] + \
+               [r for r in full_set("R250929CT1B_DIV250") if not r[0].endswith("_prestim")]
+        panels, unpaired = panels_of(recs(rows))
         self.assertEqual(panels, [])
         self.assertEqual({u.reason for u in unpaired},
                          {fd.REASON_NO_STIM, fd.REASON_NO_BASE})
 
     def test_the_same_slice_in_two_runs_does_not_pair(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250930CT1A_DIV250_stim1", "CTL", 1, 3.0),
-        ])
+        rows = [r for r in full_set() if r[0].endswith("_prestim")] + \
+               [r for r in full_set("R250930CT1A_DIV250") if not r[0].endswith("_prestim")]
+        panels, _ = panels_of(recs(rows))
         self.assertEqual(panels, [])
 
-    def test_a_base_only_slice_is_reported_and_not_plotted(self):
-        panels, unpaired = panels_of([rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0)])
-        self.assertEqual(panels, [])
-        self.assertEqual(len(unpaired), 1)
-        self.assertEqual(unpaired[0].reason, fd.REASON_NO_STIM)
-        self.assertEqual(unpaired[0].slice, "CT1A")
-
-    def test_a_stim_only_slice_is_reported_and_not_plotted(self):
-        panels, unpaired = panels_of([rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0)])
-        self.assertEqual(panels, [])
-        self.assertEqual(len(unpaired), 1)
-        self.assertEqual(unpaired[0].reason, fd.REASON_NO_BASE)
-
-    def test_two_stims_of_one_slice_share_a_panel(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            rec("R250929CT1A_DIV250_stim3", "CTL", 1, 1.0),
-        ])
+    def test_pairing_ignores_the_group_prefix(self):
+        rows = [(f, "BCTL" if f.endswith("_prestim") else "CTL", c, v)
+                for f, _, c, v in full_set()]
+        panels, _ = panels_of(recs(rows))
         self.assertEqual(len(panels), 1)
-        self.assertEqual(panels[0].stims, ["stim1", "stim3"])
-        self.assertEqual({(d.stim, d.pct) for d in panels[0].diffs},
-                         {("stim1", 50.0), ("stim3", -50.0)})
+        self.assertEqual(panels[0].grp, "CTL")
 
-    def test_a_channel_missing_from_the_base_is_set_aside(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 9, 3.0),
-        ])
-        self.assertEqual([d.channel for d in panels[0].diffs], [1])
-        self.assertEqual(panels[0].missing_base, [9])
-
-    def test_a_channel_missing_from_the_stim_is_simply_absent(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_base", "CTL", 9, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-        ])
-        self.assertEqual([d.channel for d in panels[0].diffs], [1])
-        self.assertEqual(panels[0].missing_base, [])
-
-    def test_a_zero_baseline_grounds_the_channel_instead_of_giving_a_percentage(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 0.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            rec("R250929CT1A_DIV250_stimRL", "CTL", 1, 0.0),
-        ])
-        self.assertEqual(panels[0].diffs, [])
-        self.assertEqual(len(panels[0].grounded), 1)
-        grounded = panels[0].grounded[0]
-        self.assertEqual(grounded.channel, 1)
-        self.assertEqual(grounded.base_fr, 0.0)
-        self.assertEqual(grounded.readings, (("stim1", 3.0), ("stimRL", 0.0)))
-
-    def test_a_channel_silent_under_every_stim_is_grounded_not_minus_one_hundred(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 0.0),
-            rec("R250929CT1A_DIV250_stim3", "CTL", 1, 0.0),
-        ])
-        self.assertEqual(panels[0].diffs, [])
-        self.assertEqual([g.channel for g in panels[0].grounded], [1])
-        self.assertEqual(panels[0].grounded[0].base_fr, 2.0)
-        self.assertEqual(panels[0].grounded[0].readings,
-                         (("stim1", 0.0), ("stim3", 0.0)))
-
-    def test_a_channel_silent_under_only_one_stim_still_reads_minus_one_hundred(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 0.0),
-            rec("R250929CT1A_DIV250_stim3", "CTL", 1, 3.0),
-        ])
-        self.assertEqual(panels[0].grounded, [])
-        self.assertEqual({(d.stim, d.pct) for d in panels[0].diffs},
-                         {("stim1", -100.0), ("stim3", 50.0)})
-
-    def test_a_zero_baseline_no_stim_recorded_produces_nothing(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 0.0),
-            rec("R250929CT1A_DIV250_base", "CTL", 2, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 2, 3.0),
-        ])
-        self.assertEqual(panels[0].grounded, [])
-        self.assertEqual([d.channel for d in panels[0].diffs], [2])
-
-    def test_a_duplicate_channel_keeps_the_first_value_and_says_so(self):
+    def test_groups_that_really_differ_are_noted(self):
+        rows = [(f, "MOS" if f.endswith("_stim1") else "CTL", c, v)
+                for f, _, c, v in full_set()]
         buf = io.StringIO()
         with redirect_stderr(buf):
-            panels, _ = fd.build_panels([
-                rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-                rec("R250929CT1A_DIV250_base", "CTL", 1, 99.0),
-                rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            ])
-        self.assertEqual([d.base_fr for d in panels[0].diffs], [2.0])
-        self.assertIn("duplicate", buf.getvalue())
+            panels, _ = fd.build_panels(recs(rows))
+        self.assertEqual(panels[0].grp, "CTL/MOS")
+        self.assertIn("disagree on its group", buf.getvalue())
+
+    def test_a_condition_recorded_at_two_divs_is_not_plotted(self):
+        rows = full_set() + [("R250929CT1A_DIV251_prestim", "CTL", 6, 9.0)]
+        panels, unpaired = panels_of(recs(rows))
+        self.assertEqual(panels, [])
+        self.assertEqual(unpaired[0].reason, fd.REASON_TWICE)
+        self.assertEqual(unpaired[0].conditions, ("prestim",))
 
     def test_two_unparseable_slices_of_one_run_do_not_pair_with_each_other(self):
-        panels, _ = panels_of([
-            rec("R250929_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929_DIV250_stim1", "CTL", 1, 3.0),
-        ])
+        panels, _ = panels_of(recs(full_set("R250929_DIV250")))
         self.assertEqual(panels, [])
 
     def test_an_unparseable_condition_is_excluded_and_reported(self):
@@ -232,43 +196,85 @@ class BuildPanels(unittest.TestCase):
         self.assertEqual([u.reason for u in unpaired], [fd.REASON_UNPARSED])
         self.assertEqual(unpaired[0].conditions, ("R250929MO7C_DIV_stim3",))
 
-    def test_an_unknown_condition_is_still_plotted_with_a_note(self):
+    def test_a_duplicate_channel_keeps_the_first_value_and_says_so(self):
+        rows = full_set() + [("R250929CT1A_DIV250_prestim", "CTL", 1, 99.0)]
         buf = io.StringIO()
         with redirect_stderr(buf):
-            panels, _ = fd.build_panels([
-                rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-                rec("R250929CT1A_DIV250_drug", "CTL", 1, 3.0),
-            ])
-        self.assertEqual(panels[0].stims, ["drug"])
-        self.assertEqual([d.pct for d in panels[0].diffs], [50.0])
-        self.assertIn("drug", buf.getvalue())
+            panels, _ = fd.build_panels(recs(rows))
+        self.assertEqual({d.base_fr for d in panels[0].diffs}, {2.0})
+        self.assertIn("more than one row", buf.getvalue())
 
-    def test_channels_are_the_sorted_union_of_diffs_and_grounded_channels(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 7, 2.0),
-            rec("R250929CT1A_DIV250_base", "CTL", 3, 0.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 7, 3.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 3, 1.0),
-        ])
+
+class Channels(unittest.TestCase):
+    def test_a_channel_missing_from_the_baseline_is_set_aside(self):
+        stims = {t: {1: 3.0, 9: 3.0} for t in STIMS}
+        panels, _ = panels_of(recs(full_set(stims=stims)))
+        self.assertEqual({d.channel for d in panels[0].diffs}, {1})
+        self.assertEqual(panels[0].missing_base, [9])
+
+    def test_a_channel_missing_from_a_stim_is_counted(self):
+        base = {1: 2.0, 9: 2.0}
+        stims = {"stim1": {1: 3.0}}
+        panels, _ = panels_of(recs(full_set(base=base, stims=stims)))
+        self.assertEqual(panels[0].missing_stim, [9])
+        self.assertEqual({d.stim for d in panels[0].diffs if d.channel == 9},
+                         set(STIMS) - {"stim1"})
+
+    def test_a_channel_in_no_stim_is_counted_and_plots_nothing(self):
+        base = {1: 2.0, 9: 0.0}
+        stims = {t: {1: 3.0} for t in STIMS}
+        panels, _ = panels_of(recs(full_set(base=base, stims=stims)))
+        self.assertEqual(panels[0].missing_stim, [9])
+        self.assertEqual(panels[0].excluded, [])
+
+    def test_channels_are_the_sorted_union_of_diffs_and_excluded_channels(self):
+        panels, _ = panels_of(recs(full_set(base={7: 2.0, 3: 0.0})))
         self.assertEqual(panels[0].channels, [3, 7])
+
+
+class Exclusions(unittest.TestCase):
+    def test_channel_15_is_grounded_in_every_experiment(self):
+        panels, _ = panels_of(recs(full_set(base={1: 2.0, 15: 4.0})))
+        self.assertEqual({d.channel for d in panels[0].diffs}, {1})
+        [ex] = panels[0].excluded
+        self.assertEqual((ex.channel, ex.reason), (15, fd.EXCLUDED_GROUNDED))
+        self.assertEqual(len(ex.readings), len(STIMS))
+        self.assertEqual(panels[0].unplotted, [15])
+
+    def test_a_zero_baseline_is_excluded_instead_of_giving_a_percentage(self):
+        panels, _ = panels_of(recs(full_set(base={1: 0.0})))
+        self.assertEqual(panels[0].diffs, [])
+        [ex] = panels[0].excluded
+        self.assertEqual((ex.channel, ex.reason, ex.base_fr), (1, fd.EXCLUDED_ZERO_BASE, 0.0))
+
+    def test_silence_under_every_stim_is_plotted_at_minus_one_hundred(self):
+        stims = {t: {1: 0.0} for t in STIMS}
+        panels, _ = panels_of(recs(full_set(stims=stims)))
+        self.assertEqual(panels[0].excluded, [])
+        self.assertEqual({d.pct for d in panels[0].diffs}, {-100.0})
+
+    def test_a_stimulating_channel_is_excluded_from_its_own_pattern_only(self):
+        with mock.patch.dict(fd.STIMULATED_CHANNELS, {"stim1": frozenset({1})}):
+            panels, _ = panels_of(recs(full_set()))
+        [ex] = panels[0].excluded
+        self.assertEqual((ex.reason, ex.readings), (fd.EXCLUDED_STIMULATING, (("stim1", 3.0),)))
+        self.assertEqual({d.stim for d in panels[0].diffs}, set(STIMS) - {"stim1"})
+        self.assertEqual(panels[0].unplotted, [])
+
+    def test_a_negative_baseline_is_skipped(self):
+        panels, _ = panels_of(recs(full_set(base={1: 2.0, 2: -1.0})))
+        self.assertEqual({d.channel for d in panels[0].diffs}, {1})
+        self.assertEqual(panels[0].excluded, [])
 
 
 class PanelTitle(unittest.TestCase):
     def test_one_run_is_named_by_slice_alone(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-        ])
+        panels, _ = panels_of(recs(full_set()))
         self.assertFalse(fd.multi_run(panels))
         self.assertEqual(fd.panel_title(panels[0], False), "CT1A")
 
     def test_two_runs_qualify_the_slice_with_the_run(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            rec("R250930CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250930CT1A_DIV250_stim1", "CTL", 1, 3.0),
-        ])
+        panels, _ = panels_of(recs(full_set() + full_set("R250930CT1A_DIV250")))
         self.assertTrue(fd.multi_run(panels))
         self.assertEqual([fd.panel_title(p, True) for p in panels],
                          ["R250929 CT1A", "R250930 CT1A"])
@@ -279,37 +285,26 @@ class StimLabel(unittest.TestCase):
         self.assertEqual([fd.stim_label(t) for t in ("stim1", "stim3", "stimLR", "stimRL")],
                          ["Stim 1", "Stim 3", "Stim LR", "Stim RL"])
 
-    def test_an_unknown_token_names_itself(self):
-        self.assertEqual(fd.stim_label("drug"), "drug")
-
-    def test_every_token_gets_a_colour(self):
-        colors = [fd.stim_color(t, i) for i, t in
-                  enumerate(["stim1", "stim3", "stimLR", "stimRL", "drug", "washout"])]
-        self.assertEqual(len(colors), 6)
-        self.assertTrue(all(c.startswith("#") for c in colors))
-        self.assertEqual(len(set(colors[:4])), 4)
+    def test_every_pattern_has_its_own_colour(self):
+        self.assertEqual(len(set(fd.STIM_COLORS.values())), len(STIMS))
+        self.assertNotIn(fd.EXCLUDED_COLOR, fd.STIM_COLORS.values())
 
 
 class Payload(unittest.TestCase):
     def build(self):
-        panels, _ = panels_of([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_base", "CTL", 2, 0.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 2, 1.0),
-            rec("R250929CT1A_DIV250_stim3", "CTL", 9, 1.0),
-            rec("R250929CT2C_DIV250_base", "CTL", 1, 1.0),
-            rec("R250929CT2C_DIV250_stimLR", "CTL", 1, 0.5),
-        ])
+        panels, _ = panels_of(recs(
+            full_set(base={1: 2.0, 2: 0.0},
+                     stims={"stim1": {1: 3.0, 2: 1.0, 9: 1.0}})
+            + full_set("R250929CT2C_DIV250", base={1: 1.0})))
         return panels, fd.build_payload(panels, "data.csv")
 
     def test_it_survives_a_json_round_trip(self):
         _, payload = self.build()
         self.assertEqual(json.loads(json.dumps(payload)), payload)
 
-    def test_conditions_are_listed_in_natural_order(self):
+    def test_conditions_are_the_four_patterns(self):
         _, payload = self.build()
-        self.assertEqual(payload["stims"], ["stim1", "stim3", "stimLR"])
+        self.assertEqual(payload["stims"], list(STIMS))
         self.assertEqual(set(payload["labels"]), set(payload["colors"]["stim"]))
 
     def test_the_range_spans_every_panel(self):
@@ -328,31 +323,24 @@ class Payload(unittest.TestCase):
         _, payload = self.build()
         for p in payload["panels"]:
             self.assertEqual(p["n"]["paired"], len({q["c"] for q in p["points"]}))
-            self.assertEqual(p["n"]["grounded"], len(p["grounded"]))
+            self.assertEqual(p["n"]["excluded"], len(p["excluded"]))
             self.assertEqual(p["n"]["missingBase"], len(p["missingBase"]))
 
-    def test_a_grounded_channel_is_carried_as_a_bare_channel_number(self):
+    def test_an_excluded_channel_is_carried_as_a_bare_channel_number(self):
         _, payload = self.build()
         ct1a = next(p for p in payload["panels"] if p["slice"] == "CT1A")
-        self.assertEqual(ct1a["grounded"], [2])
+        self.assertEqual(ct1a["excluded"], [2])
         self.assertEqual(ct1a["missingBase"], [9])
-
-    def test_the_grounded_colour_travels_with_the_payload(self):
-        _, payload = self.build()
-        self.assertEqual(payload["colors"]["grounded"], fd.GROUNDED_COLOR)
-
-    def test_a_grounded_channel_still_gets_an_x_position(self):
-        _, payload = self.build()
-        ct1a = next(p for p in payload["panels"] if p["slice"] == "CT1A")
         self.assertIn(2, ct1a["channels"])
+
+    def test_the_excluded_colour_travels_with_the_payload(self):
+        _, payload = self.build()
+        self.assertEqual(payload["colors"]["excluded"], fd.EXCLUDED_COLOR)
 
 
 class RenderHtml(unittest.TestCase):
-    def page(self, filename="R250929CT1A_DIV250_base"):
-        panels, _ = panels_of([
-            rec(filename, "CTL", 1, 2.0),
-            rec(filename.replace("_base", "_stim1"), "CTL", 1, 3.0),
-        ])
+    def page(self, stem="R250929CT1A_DIV250"):
+        panels, _ = panels_of(recs(full_set(stem)))
         return fd.render_html(fd.build_payload(panels, "data.csv"), fd.initial_state())
 
     def test_every_placeholder_is_substituted(self):
@@ -367,7 +355,7 @@ class RenderHtml(unittest.TestCase):
         # The name still has to pair, since only paired recordings reach the
         # payload; the condition is the last underscore-separated token, so a
         # hostile middle segment survives parsing and lands in "baseFile".
-        html = self.page("R250929CT1A_DIV250_</script><b>x</b>_base")
+        html = self.page("R250929CT1A_DIV250_</script><b>x</b>")
         self.assertNotIn("</script><b>", html)
         self.assertIn("<\\/script><b>", html)
 
@@ -380,31 +368,32 @@ class Describe(unittest.TestCase):
             fd.describe(panels, unpaired)
         return buf.getvalue()
 
-    def test_a_paired_slice_names_its_conditions_and_counts(self):
-        out = self.listing([
-            rec("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-            rec("R250929CT1A_DIV250_base", "CTL", 2, 0.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 1, 3.0),
-            rec("R250929CT1A_DIV250_stim1", "CTL", 2, 1.0),
-            rec("R250929CT1A_DIV250_stim3", "CTL", 9, 1.0),
-        ])
-        self.assertIn("R250929 CT1A: base + stim1, stim3", out)
+    def test_a_plotted_slice_names_its_conditions_and_counts(self):
+        out = self.listing(recs(full_set(base={1: 2.0, 2: 0.0, 15: 1.0},
+                                         stims={"stim1": {1: 3.0, 2: 1.0, 15: 1.0, 9: 1.0}})))
+        self.assertIn("R250929 CT1A: prestim + stim1, stim3, stimLR, stimRL", out)
         self.assertIn("1 channels paired", out)
-        self.assertIn("1 grounded or stimulated (2)", out)
+        self.assertIn("2 excluded: 2 (0 Hz baseline), 15 (grounded)", out)
         self.assertIn("1 stim-only", out)
-        self.assertIn("1 of 1 slice(s) paired.", out)
+        self.assertIn("1 of 1 slice(s) plotted.", out)
 
-    def test_each_unpaired_slice_gives_its_reason(self):
-        out = self.listing([
-            rec("R250929MT3D_DIV250_base", "MUT", 1, 2.0),
-            rec("R250929MO2A_DIV250_stimRL", "MOS", 1, 2.0),
-            rec("R250929MO7C_DIV_stim3", "MOS", 13, 0.95),
-        ])
-        self.assertIn("Not paired:", out)
-        self.assertIn("R250929 MT3D: base only (no stim recording)", out)
-        self.assertIn("R250929 MO2A: stimRL only (no base recording)", out)
+    def test_a_stimulating_channel_names_its_pattern(self):
+        with mock.patch.dict(fd.STIMULATED_CHANNELS, {"stimLR": frozenset({1})}):
+            out = self.listing(recs(full_set()))
+        self.assertIn("1 (stimulating: stimLR)", out)
+
+    def test_each_unplotted_slice_gives_its_reason(self):
+        out = self.listing(recs(
+            [r for r in full_set("R250929MT3D_DIV250") if r[0].endswith("_prestim")]
+            + [("R250929MO2A_DIV250_stimRL", "MOS", 1, 2.0)]
+            + full_set("R250929CT4B_DIV250", skip=("stimLR",))
+        ) + [rec("R250929MO7C_DIV_stim3", "MOS", 13, 0.95)])
+        self.assertIn("Not plotted:", out)
+        self.assertIn("R250929 MT3D: prestim only (no stim recording)", out)
+        self.assertIn("R250929 MO2A: stimRL only (no prestim recording)", out)
+        self.assertIn("R250929 CT4B: prestim, stim1, stim3, stimRL (incomplete: no stimLR)", out)
         self.assertIn("condition not parsed from the file name (R250929MO7C_DIV_stim3)", out)
-        self.assertIn("0 of 3 slice(s) paired.", out)
+        self.assertIn("0 of 4 slice(s) plotted.", out)
 
 
 class Cli(unittest.TestCase):
@@ -433,26 +422,19 @@ class Cli(unittest.TestCase):
             self.assertIn("Stim LR", html)
             self.assertEqual(len(list(Path(tmp).glob("*.html"))), 1)
 
-    def test_an_unpairable_file_fails_and_writes_nothing(self):
+    def test_an_incomplete_file_fails_and_writes_nothing(self):
         with tempfile.TemporaryDirectory() as tmp:
-            csv_path = write_csv(tmp, "data.csv", [
-                ("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-                ("R250929CT2C_DIV250_stim1", "CTL", 1, 3.0),
-            ])
+            csv_path = write_csv(tmp, "data.csv", full_set(skip=("stim1",)))
             out = Path(tmp) / "diff.html"
             proc = self.run_cli(tmp, str(csv_path), "-o", str(out), expect_ok=False)
             self.assertIn("--list", proc.stderr)
             self.assertFalse(out.exists())
 
-    def test_list_still_works_on_an_unpairable_file(self):
+    def test_list_still_works_on_an_incomplete_file(self):
         with tempfile.TemporaryDirectory() as tmp:
-            csv_path = write_csv(tmp, "data.csv", [
-                ("R250929CT1A_DIV250_base", "CTL", 1, 2.0),
-                ("R250929CT2C_DIV250_stim1", "CTL", 1, 3.0),
-            ])
+            csv_path = write_csv(tmp, "data.csv", full_set(skip=("stim1",)))
             proc = self.run_cli(tmp, str(csv_path), "--list")
-            self.assertIn("no stim recording", proc.stdout)
-            self.assertIn("no base recording", proc.stdout)
+            self.assertIn("incomplete: no stim1", proc.stdout)
 
     def test_slice_sets_the_initial_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -491,17 +473,21 @@ class SampleFile(unittest.TestCase):
     def rows(self):
         return SAMPLE_CSV.read_text().splitlines()
 
-    def derived(self, tmp, name, stim_row, base_fr):
-        """A pairable file: one of the sample's stim rows plus a _base sibling of it,
+    def derived(self, tmp, name, base_fr):
+        """A complete set built from the sample's CT1A stim1 row: that row as-is,
+        a prestim sibling reading `base_fr`, and the three other patterns, all
         over the sample's own 12-column header."""
         header = self.rows()[0]
-        stim = next(r for r in self.rows()[1:] if stim_row in r)
+        stim = next(r for r in self.rows()[1:] if r.startswith("R250929CT1A_DIV250_stim1"))
         cells = stim.split(",")
-        base = list(cells)
-        base[0] = cells[0].rsplit("_", 1)[0] + "_base"
-        base[4] = str(base_fr)
+        lines = [header, stim]
+        for token, fr in [("prestim", base_fr)] + [(t, cells[4]) for t in STIMS[1:]]:
+            row = list(cells)
+            row[0] = "R250929CT1A_DIV250_" + token
+            row[4] = str(fr)
+            lines.append(",".join(row))
         path = Path(tmp) / name
-        path.write_text("\n".join([header, stim, ",".join(base)]) + "\n")
+        path.write_text("\n".join(lines) + "\n")
         return path
 
     def test_nothing_in_the_sample_pairs(self):
@@ -521,37 +507,40 @@ class SampleFile(unittest.TestCase):
             self.assertIn("nothing to", proc.stderr)
             self.assertFalse(out.exists())
 
-    def test_list_names_every_recording_in_the_sample(self):
+    def test_list_names_every_stim_recording_in_the_sample(self):
         proc = subprocess.run(
             [sys.executable, str(Path(fd.__file__)), str(SAMPLE_CSV), "--list"],
             capture_output=True, text=True,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        for slc in ("CT1A", "MT3D", "CT2C", "MO2A"):
+        for slc in ("CT1A", "CT2C", "MO2A"):
             self.assertIn(slc, proc.stdout)
         self.assertIn("R250929MO7C_DIV_stim3", proc.stdout)
-        self.assertIn("0 of 5 slice(s) paired.", proc.stdout)
+        # MT3D's only recording is a _base, which this analysis ignores.
+        self.assertNotIn("MT3D", proc.stdout)
+        self.assertIn("MT3D", proc.stderr)
+        self.assertIn("0 of 4 slice(s) plotted.", proc.stdout)
 
-    def test_a_derived_pair_computes_a_percentage_over_the_real_header(self):
+    def test_a_derived_set_computes_a_percentage_over_the_real_header(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = self.derived(tmp, "paired.csv", "_stim1", 2.0)
+            path = self.derived(tmp, "paired.csv", 2.0)
             panels, _ = panels_of(fb.load_records(path))
             self.assertEqual(len(panels), 1)
             self.assertEqual(panels[0].slice, "CT1A")
-            self.assertEqual(len(panels[0].diffs), 1)
+            self.assertEqual(len(panels[0].diffs), len(STIMS))
             self.assertAlmostEqual(panels[0].diffs[0].pct, 41.722222, places=4)
 
-    def test_a_derived_zero_baseline_grounds_the_channel_and_plots_no_point(self):
+    def test_a_derived_zero_baseline_is_excluded_and_plots_no_point(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = self.derived(tmp, "zero.csv", "_stimRL", 0)
+            path = self.derived(tmp, "zero.csv", 0)
             panels, _ = panels_of(fb.load_records(path))
             self.assertEqual(len(panels), 1)
             self.assertEqual(panels[0].diffs, [])
-            self.assertEqual(panels[0].grounded[0].readings, (("stimRL", 0.0),))
+            self.assertEqual(panels[0].excluded[0].reason, fd.EXCLUDED_ZERO_BASE)
 
-    def test_the_cli_writes_a_viewer_for_a_derived_pair(self):
+    def test_the_cli_writes_a_viewer_for_a_derived_set(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = self.derived(tmp, "paired.csv", "_stim1", 2.0)
+            path = self.derived(tmp, "paired.csv", 2.0)
             out = Path(tmp) / "diff.html"
             proc = subprocess.run(
                 [sys.executable, str(Path(fd.__file__)), str(path), "-o", str(out)],

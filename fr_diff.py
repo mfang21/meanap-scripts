@@ -2,34 +2,42 @@
 """Percentage change in firing rate (FR) from baseline, per channel, from a MEA-NAP CSV.
 
 Each row of the CSV holds one (FileName, Grp, Channel, FR) observation. A slice
-recorded under stimulation is compared against the same slice's own baseline
-recording, channel by channel:
+recorded under stimulation is compared against the same slice's own
+pre-stimulation recording, channel by channel:
 
-    percentage difference = 100 x (stim FR - base FR) / base FR
+    percentage difference = 100 x (stim FR - baseline FR) / baseline FR
 
 Pairing
 -------
-The condition is the token after "DIV<n>_" in the file name: "base" for the
-baseline and "stim1", "stim3", "stimLR", "stimRL" for the stimulation patterns.
-A stim recording pairs with a base recording when the run ID *and* the slice
-match, so "R250929CT1A_DIV250_stim1" pairs with "R250929CT1A_DIV250_base" but
-never with "R250929CT1B_DIV250_base" (different slice) or with
-"R250930CT1A_DIV250_base" (different run).
+The condition is the token after "DIV<n>_" in the file name. The baseline is
+"prestim"; the stimulation patterns are "stim1" (spatial 1), "stim3" (spatial
+3), "stimLR" and "stimRL" (temporal). Any other condition, including the older
+"base" recordings, is not part of this analysis and is ignored with a note.
 
-Not every slice was recorded under stimulation. A slice with only a baseline
-(or only stimulation) has nothing to compare, so no percentage is computed and
-it gets no panel. Use --list to see which slices paired and which did not.
+A stim recording pairs with a prestim recording when the run ID *and* the slice
+match, so "R250929CT1A_DIV250_stim1" pairs with "R250929CT1A_DIV250_prestim"
+but never with "R250929CT1B_DIV250_prestim" (different slice) or with
+"R250930CT1A_DIV250_prestim" (different run). The slice is the token fused onto
+the run ID ("CT1A"); Grp plays no part in pairing.
 
-Grounded and stimulated channels
---------------------------------
-Some channels report 0 Hz for reasons that have nothing to do with the organoid:
-the electrode was grounded, or it was the one delivering the stimulation and so
-recorded nothing while it fired. Both show up the same way in the export, either
-as a baseline FR of 0, which leaves no percentage to compute, or as a baseline
-that is fine while every stimulation recording reads 0, which comes out as a flat
--100%. Neither is a firing-rate change, so the channel is not plotted; its number
-is printed in red along the x-axis of that slice's panel instead, and --list
-names it.
+Only complete experiments are plotted: a slice needs its prestim recording and
+all four stimulation patterns. A slice missing any of them gets no panel. A
+slice with a condition recorded twice (e.g. at two DIVs) gets no panel either,
+since there is no telling which recording a reading belongs with; merge_csv.py
+refuses to produce such a file in the first place. Use --list to see which
+slices were plotted and why the rest were not.
+
+Excluded channels
+-----------------
+Some readings say nothing about the organoid. A channel listed in
+GROUNDED_CHANNELS is left out of every recording, and one listed under a pattern
+in STIMULATED_CHANNELS is left out of that pattern only. A channel whose
+baseline is 0 Hz has no percentage to compute and is left out too. A channel
+left with no point to plot has its number printed in red along the x-axis of
+that slice's panel, and --list names it with the reason.
+
+A channel that falls silent under stimulation is *not* assumed to be the
+stimulating electrode: it is plotted at -100%.
 
 Usage
 -----
@@ -52,10 +60,10 @@ Write the viewer to a file (to share, or on a headless machine):
     python3 fr_diff.py data.csv -o diff.html
     python3 fr_diff.py data.csv --slice CT1A -o diff.html    # initial selection
 
-List what paired and what did not, with per-slice channel counts:
+List what was plotted and what was not, with per-slice channel counts:
     python3 fr_diff.py data.csv --list
 
-Exits 1 if no slice has both a baseline and a stimulation recording.
+Exits 1 if no slice has a complete set of recordings.
 
 Needs fr_boxplots.py beside it (it shares that script's CSV reader and file-name
 grammar). Unlike fr_boxplots.py it does not need matplotlib.
@@ -93,18 +101,23 @@ from fr_boxplots import (
 # Configuration
 # --------------------------------------------------------------------------- #
 
-BASE = "base"                      # the condition token every stim is measured against
+BASELINE = "prestim"               # the condition every stim is measured against
 
-# Condition token -> the name shown in the legend.
+# Condition token -> the name shown in the legend. A slice needs the baseline
+# and every one of these to be plotted; any other condition is ignored.
 STIM_LABELS = {"stim1": "Stim 1", "stim3": "Stim 3",
                "stimLR": "Stim LR", "stimRL": "Stim RL"}
-
-# Identity colours for the four known patterns; anything else the file happens
-# to hold takes the remaining palette entries in the order it is encountered.
+REQUIRED_STIMS = tuple(STIM_LABELS)
 STIM_COLORS = dict(zip(STIM_LABELS, PALETTE))
-EXTRA_COLORS = PALETTE[len(STIM_LABELS):]
 
-GROUNDED_COLOR = "#e34948"         # grounded channel numbers on the x axis, nothing else
+# Electrodes whose readings are not the organoid's. A grounded channel is left
+# out of every recording; a stimulating channel only out of the pattern that
+# drove it (condition token -> channels). Channel 15 is grounded in every
+# experiment. The stimulating electrodes of each pattern are not filled in yet.
+GROUNDED_CHANNELS: frozenset[int] = frozenset({15})
+STIMULATED_CHANNELS: dict[str, frozenset[int]] = {}
+
+EXCLUDED_COLOR = "#e34948"         # excluded channel numbers on the x axis, nothing else
 GRID_COLOR = "#e4e3df"
 INK_COLOR = "#52514e"
 ZERO_LINE_COLOR = "#bdbcb8"        # the 0 % reference line inside each panel
@@ -124,31 +137,38 @@ class Diff:
     stim_fr: float
 
 
-@dataclass(frozen=True)
-class Grounded:
-    """A channel whose electrode recorded nothing. See is_grounded().
+EXCLUDED_GROUNDED = "grounded"
+EXCLUDED_STIMULATING = "stimulating"
+EXCLUDED_ZERO_BASE = "0 Hz baseline"
 
-    `readings` holds what each stimulation pattern recorded on that channel. The
-    viewer plots none of it; --list names the channel so the numbers can be
-    looked at when they matter.
+
+@dataclass(frozen=True)
+class Excluded:
+    """Readings of one channel left out of the plot, and why.
+
+    `readings` holds what each stimulation pattern recorded on that channel and
+    was set aside: every pattern for a grounded channel or a 0 Hz baseline, only
+    the driving patterns for a stimulating one.
     """
     channel: int
-    base_fr: float                              # 0 when that is what grounded it
+    reason: str                                 # one of the EXCLUDED_* constants
+    base_fr: float
     readings: tuple[tuple[str, float], ...]     # ((token, stim_fr), ...), never empty
 
 
 @dataclass
 class Panel:
-    """One slice that has a baseline *and* at least one stimulation recording."""
+    """One slice with a baseline and every stimulation pattern."""
     run: str             # e.g. R250929
     slice: str           # e.g. CT1A
     organoid: str        # e.g. CT1
-    grp: str
+    grp: str             # e.g. CTL, whatever prefix the export gave it
     base_file: str
     stim_files: dict[str, str]          # condition token -> FileName
     diffs: list[Diff] = field(default_factory=list)
-    grounded: list[Grounded] = field(default_factory=list)
-    missing_base: list[int] = field(default_factory=list)   # in a stim, absent from base
+    excluded: list[Excluded] = field(default_factory=list)
+    missing_base: list[int] = field(default_factory=list)   # in a stim, absent from baseline
+    missing_stim: list[int] = field(default_factory=list)   # in baseline, absent from a stim
 
     @property
     def id(self) -> str:
@@ -160,7 +180,13 @@ class Panel:
 
     @property
     def channels(self) -> list[int]:
-        return sorted({d.channel for d in self.diffs} | {g.channel for g in self.grounded})
+        return sorted({d.channel for d in self.diffs} | {e.channel for e in self.excluded})
+
+    @property
+    def unplotted(self) -> list[int]:
+        """Excluded channels left with no point at all: the ones marked in red."""
+        plotted = {d.channel for d in self.diffs}
+        return sorted({e.channel for e in self.excluded} - plotted)
 
 
 @dataclass(frozen=True)
@@ -170,10 +196,13 @@ class Unpaired:
     slice: str
     conditions: tuple[str, ...]
     reason: str          # see the REASON_* constants
+    missing: tuple[str, ...] = ()       # the patterns an incomplete slice lacks
 
 
 REASON_NO_STIM = "no stim recording"
-REASON_NO_BASE = "no base recording"
+REASON_NO_BASE = f"no {BASELINE} recording"
+REASON_INCOMPLETE = "incomplete"
+REASON_TWICE = "a condition recorded twice"
 REASON_UNPARSED = "condition not parsed"
 
 
@@ -182,7 +211,7 @@ REASON_UNPARSED = "condition not parsed"
 # --------------------------------------------------------------------------- #
 
 def parse_run(filename: str) -> str | None:
-    """Return the run ID "R250929" from "R250929CT1A_DIV250_base", or None.
+    """Return the run ID "R250929" from "R250929CT1A_DIV250_prestim", or None.
 
     The twin of merge_csv.parse_run. Half of the pairing key; the other half is
     the slice, which fr_boxplots.parse_organoid supplies.
@@ -191,41 +220,23 @@ def parse_run(filename: str) -> str | None:
     return m.group(1) if m else None
 
 
-def pct_diff(base_fr: float, stim_fr: float) -> float | None:
-    """Percentage change from `base_fr` to `stim_fr`, or None if there is no answer.
+def group_of(grp: str) -> str:
+    """The experimental group from a Grp value: its last three characters.
 
-    A baseline of 0 has no percentage to give: every change from it is infinite.
-    Those channels are reported as Grounded instead of being dropped.
+    Some exports prefix the group with a letter (BCTL, BMOS, BMUT), so "BCTL"
+    and "CTL" are the same group.
     """
-    if base_fr <= 0:
-        return None
+    return grp.strip().upper()[-3:]
+
+
+def pct_diff(base_fr: float, stim_fr: float) -> float:
+    """Percentage change from `base_fr` to `stim_fr`. `base_fr` must be above 0."""
     return 100.0 * (stim_fr - base_fr) / base_fr
 
 
-def is_grounded(base_fr: float, readings: tuple[tuple[str, float], ...]) -> bool:
-    """Whether a channel recorded nothing: it was grounded, or it stimulated.
-
-    Two ways that shows up. The baseline is 0, which leaves no percentage to
-    compute; or the baseline is fine but every stimulation recording reads 0,
-    because that electrode was the one delivering the stimulation. Either way the
-    number says more about the electrode than about the organoid, so the channel
-    is reddened on the axis rather than plotted.
-    """
-    if base_fr == 0:
-        return True
-    return bool(readings) and all(fr == 0 for _, fr in readings)
-
-
 def stim_label(token: str) -> str:
-    """The legend name for a condition token; an unknown token names itself."""
-    return STIM_LABELS.get(token, token)
-
-
-def stim_color(token: str, index: int) -> str:
-    """The colour for a condition token, fixed for the four known patterns."""
-    if token in STIM_COLORS:
-        return STIM_COLORS[token]
-    return EXTRA_COLORS[index % len(EXTRA_COLORS)] if EXTRA_COLORS else GROUNDED_COLOR
+    """The legend name for a condition token."""
+    return STIM_LABELS[token]
 
 
 # --------------------------------------------------------------------------- #
@@ -246,19 +257,24 @@ def _div(filename: str) -> str | None:
     return m.group(1) if m else None
 
 
-def _bucket(records: list[Record]) -> tuple[dict, list[Unpaired]]:
+def _bucket(records: list[Record]) -> tuple[dict, dict, list[Unpaired]]:
     """Group usable records by (run, slice) -> condition -> channel -> (fr, filename).
 
-    Records whose run, condition or slice could not be parsed cannot be paired;
-    they are reported and left out.
+    Also returns (run, slice, condition) -> the FileNames seen for it, so a
+    condition recorded twice can be caught. Records whose run, condition or slice
+    could not be parsed cannot be paired, and records of a condition outside this
+    analysis are not wanted; both are reported and left out.
     """
     by_key: dict[tuple[str, str], dict[str, dict[int, tuple[float, str]]]] = defaultdict(
         lambda: defaultdict(dict))
+    files_of: dict[tuple[str, str, str], set[str]] = defaultdict(set)
     unpaired: list[Unpaired] = []
+    wanted = {BASELINE, *REQUIRED_STIMS}
 
     no_run: list[str] = []
     no_stim: list[str] = []
     no_slice: list[str] = []
+    ignored: dict[str, set[str]] = defaultdict(set)     # token -> FileNames
     duplicates: list[str] = []
 
     for r in records:
@@ -270,11 +286,15 @@ def _bucket(records: list[Record]) -> tuple[dict, list[Unpaired]]:
             no_stim.append(r.filename)
             unpaired.append(Unpaired(run, r.slice, (r.filename,), REASON_UNPARSED))
             continue
+        if r.stim not in wanted:
+            ignored[r.stim].add(r.filename)
+            continue
         # Every unparseable name shares the slice UNKNOWN, so keeping them would
         # let two unrelated recordings pair with each other.
         if r.slice == UNKNOWN:
             no_slice.append(r.filename)
             continue
+        files_of[(run, r.slice, r.stim)].add(r.filename)
         channels = by_key[(run, r.slice)][r.stim]
         if r.channel in channels:
             duplicates.append(r.filename)
@@ -287,12 +307,17 @@ def _bucket(records: list[Record]) -> tuple[dict, list[Unpaired]]:
     if no_stim:
         _note(f"no condition after 'DIV<n>_' in {len(set(no_stim))} file name(s); "
               f"they cannot be paired:", list(set(no_stim)))
+    if ignored:
+        names = [n for files in ignored.values() for n in files]
+        _note(f"{len(names)} recording(s) of condition(s) {', '.join(sorted(ignored))} "
+              f"were ignored; this analysis uses {BASELINE} and "
+              f"{', '.join(REQUIRED_STIMS)} only:", names)
     if no_slice:
         _note(f"no organoid slice in {len(set(no_slice))} file name(s); "
               f"they cannot be paired:", list(set(no_slice)))
     if duplicates:
-        _note(f"{len(duplicates)} duplicate row(s) for a channel already seen in the "
-              f"same recording; the first value was kept:", list(set(duplicates)))
+        _note(f"{len(duplicates)} channel(s) appear on more than one row of the same "
+              f"file name; the first value was kept:", list(set(duplicates)))
 
     # Collapse the per-file Unpaired rows so one recording is named once.
     seen: set[tuple[str, str, str]] = set()
@@ -302,89 +327,121 @@ def _bucket(records: list[Record]) -> tuple[dict, list[Unpaired]]:
         if key not in seen:
             seen.add(key)
             deduped.append(u)
-    return by_key, deduped
+    return by_key, files_of, deduped
+
+
+def _classify(panel: Panel, channel: int, base_fr: float,
+              readings: tuple[tuple[str, float], ...]) -> None:
+    """Add one channel's percentages, or its exclusion, to `panel`."""
+    if channel in GROUNDED_CHANNELS:
+        panel.excluded.append(Excluded(channel, EXCLUDED_GROUNDED, base_fr, readings))
+        return
+    # TODO: a 0 Hz baseline is taken to mean an electrode that recorded nothing;
+    # whether any are really silent-then-recruited channels is still open.
+    if base_fr == 0:
+        panel.excluded.append(Excluded(channel, EXCLUDED_ZERO_BASE, base_fr, readings))
+        return
+    driving = tuple((t, fr) for t, fr in readings
+                    if channel in STIMULATED_CHANNELS.get(t, ()))
+    if driving:
+        panel.excluded.append(Excluded(channel, EXCLUDED_STIMULATING, base_fr, driving))
+    driven_by = {t for t, _ in driving}
+    for token, stim_fr in readings:
+        if token not in driven_by:
+            panel.diffs.append(Diff(channel, token, pct_diff(base_fr, stim_fr),
+                                    base_fr, stim_fr))
 
 
 def build_panels(records: list[Record]) -> tuple[list[Panel], list[Unpaired]]:
-    """Pair each slice's stim recordings against its own baseline.
+    """Pair each complete slice's stim recordings against its own baseline.
 
     Returns the panels that can be plotted and, alongside them, the slices that
-    could not be paired so --list can explain the gaps.
+    could not be so --list can explain the gaps.
     """
-    by_key, unpaired = _bucket(records)
-    grp_of = {(parse_run(r.filename), r.slice): r.grp for r in records}
-    organoid_of = {(parse_run(r.filename), r.slice): r.organoid for r in records}
+    by_key, files_of, unpaired = _bucket(records)
+    grps_of: dict[tuple[str | None, str], set[str]] = defaultdict(set)
+    organoid_of: dict[tuple[str | None, str], str] = {}
+    for r in records:
+        grps_of[(parse_run(r.filename), r.slice)].add(group_of(r.grp))
+        organoid_of[(parse_run(r.filename), r.slice)] = r.organoid
 
     panels: list[Panel] = []
-    unknown_tokens: set[str] = set()
     negative_base: list[str] = []
     mixed_div: list[str] = []
+    mixed_grp: list[str] = []
 
     for (run, slc) in sorted(by_key, key=lambda k: (_natural_key(k[0]), _natural_key(k[1]))):
         conditions = by_key[(run, slc)]
-        stim_tokens = sorted((t for t in conditions if t != BASE), key=_natural_key)
+        present = [t for t in REQUIRED_STIMS if t in conditions]
+        missing = tuple(t for t in REQUIRED_STIMS if t not in conditions)
+        twice = [t for t in conditions if len(files_of[(run, slc, t)]) > 1]
 
-        if BASE not in conditions:
-            unpaired.append(Unpaired(run, slc, tuple(stim_tokens), REASON_NO_BASE))
+        if twice:
+            unpaired.append(Unpaired(run, slc, tuple(sorted(twice, key=_natural_key)),
+                                     REASON_TWICE))
             continue
-        if not stim_tokens:
-            unpaired.append(Unpaired(run, slc, (BASE,), REASON_NO_STIM))
+        if BASELINE not in conditions:
+            unpaired.append(Unpaired(run, slc, tuple(present), REASON_NO_BASE))
+            continue
+        if not present:
+            unpaired.append(Unpaired(run, slc, (BASELINE,), REASON_NO_STIM))
+            continue
+        if missing:
+            unpaired.append(Unpaired(run, slc, (BASELINE, *present), REASON_INCOMPLETE,
+                                     missing))
             continue
 
-        base_channels = conditions[BASE]
-        base_file = next(iter(base_channels.values()))[1] if base_channels else ""
-        stim_files = {t: next(iter(conditions[t].values()))[1] for t in stim_tokens}
+        base_channels = conditions[BASELINE]
+        base_file = next(iter(files_of[(run, slc, BASELINE)]))
+        stim_files = {t: next(iter(files_of[(run, slc, t)])) for t in REQUIRED_STIMS}
 
-        # The pairing rule the user specified is run + slice, so a pair whose DIV
-        # tokens differ is still a pair -- but it is worth saying out loud.
+        # The pairing rule is run + slice, so a pair whose DIV tokens differ is
+        # still a pair -- but it is worth saying out loud.
         base_div = _div(base_file)
         for token, name in stim_files.items():
             if base_div and _div(name) and _div(name) != base_div:
-                mixed_div.append(f"{run} {slc}: {base_div}_{BASE} with {_div(name)}_{token}")
+                mixed_div.append(f"{run} {slc}: {base_div}_{BASELINE} with {_div(name)}_{token}")
+
+        grps = grps_of.get((run, slc), set())
+        if len(grps) > 1:
+            mixed_grp.append(f"{run} {slc}: {', '.join(sorted(grps))}")
 
         panel = Panel(run=run, slice=slc,
                       organoid=organoid_of.get((run, slc), UNKNOWN),
-                      grp=grp_of.get((run, slc), ""),
+                      grp="/".join(sorted(grps)),
                       base_file=base_file, stim_files=stim_files)
 
-        unknown_tokens.update(t for t in stim_tokens if t not in STIM_LABELS)
-
-        # Channel-major: whether a channel was grounded is a fact about the
+        # Channel-major: whether a channel is excluded is a fact about the
         # channel across every condition, not about one stim recording.
-        for channel in sorted({c for t in stim_tokens for c in conditions[t]}):
-            readings = tuple((t, conditions[t][channel][0])
-                             for t in stim_tokens if channel in conditions[t])
+        stim_channels = {c for t in REQUIRED_STIMS for c in conditions[t]}
+        for channel in sorted(stim_channels | set(base_channels)):
             if channel not in base_channels:
                 panel.missing_base.append(channel)
+                continue
+            readings = tuple((t, conditions[t][channel][0])
+                             for t in REQUIRED_STIMS if channel in conditions[t])
+            if len(readings) < len(REQUIRED_STIMS):
+                panel.missing_stim.append(channel)
+            if not readings:
                 continue
             base_fr = base_channels[channel][0]
             if base_fr < 0:
                 negative_base.append(base_channels[channel][1])
                 continue
-            if is_grounded(base_fr, readings):
-                panel.grounded.append(Grounded(channel, base_fr, readings))
-                continue
-            for token, stim_fr in readings:
-                panel.diffs.append(Diff(channel, token, pct_diff(base_fr, stim_fr),
-                                        base_fr, stim_fr))
+            _classify(panel, channel, base_fr, readings)
 
         panels.append(panel)
 
-    if unknown_tokens:
-        _note(f"condition(s) {', '.join(sorted(unknown_tokens))} are not one of "
-              f"{', '.join(STIM_LABELS)}; they are plotted under their own name.")
     if negative_base:
         _note(f"{len(negative_base)} channel(s) have a negative baseline FR, which is not "
               f"a firing rate; they were skipped:", list(set(negative_base)))
     if mixed_div:
         _note("a pair spans two DIVs (run ID and slice still match, so it is a pair):",
               list(set(mixed_div)))
+    if mixed_grp:
+        _note("a slice's recordings disagree on its group (compared on the last three "
+              "characters of Grp):", mixed_grp)
     return panels, unpaired
-
-
-def all_stims(panels: list[Panel]) -> list[str]:
-    """Every condition token present across the panels, in natural order."""
-    return sorted({t for p in panels for t in p.stim_files}, key=_natural_key)
 
 
 def pct_range(panels: list[Panel]) -> tuple[float, float]:
@@ -412,25 +469,36 @@ def describe(panels: list[Panel], unpaired: list[Unpaired]) -> None:
     """
     for p in panels:
         counts = [f"{len({d.channel for d in p.diffs})} channels paired"]
-        if p.grounded:
-            channels = ", ".join(str(g.channel) for g in p.grounded)
-            counts.append(f"{len(p.grounded)} grounded or stimulated ({channels})")
+        if p.excluded:
+            named = ", ".join(f"{e.channel} ({e.reason}"
+                              + (f": {', '.join(t for t, _ in e.readings)})"
+                                 if e.reason == EXCLUDED_STIMULATING else ")")
+                              for e in p.excluded)
+            counts.append(f"{len(p.excluded)} excluded: {named}")
         if p.missing_base:
             counts.append(f"{len(p.missing_base)} stim-only")
-        print(f"{p.run} {p.slice}: {BASE} + {', '.join(p.stims)}"
+        if p.missing_stim:
+            counts.append(f"{len(p.missing_stim)} missing from a stim recording")
+        print(f"{p.run} {p.slice}: {BASELINE} + {', '.join(p.stims)}"
               f"   |   {', '.join(counts)}")
 
     if unpaired:
-        print("Not paired:")
+        print("Not plotted:")
         for u in sorted(unpaired, key=lambda u: (_natural_key(u.run), _natural_key(u.slice))):
             if u.reason == REASON_UNPARSED:
                 print(f"  {u.run}: condition not parsed from the file name "
                       f"({u.conditions[0]})")
+            elif u.reason == REASON_INCOMPLETE:
+                print(f"  {u.run} {u.slice}: {', '.join(u.conditions)} "
+                      f"(incomplete: no {', '.join(u.missing)})")
+            elif u.reason == REASON_TWICE:
+                print(f"  {u.run} {u.slice}: {', '.join(u.conditions)} recorded more than "
+                      f"once (e.g. at two DIVs)")
             else:
                 print(f"  {u.run} {u.slice}: {', '.join(u.conditions)} only ({u.reason})")
 
     total = len(panels) + len(unpaired)
-    print(f"{len(panels)} of {total} slice(s) paired.")
+    print(f"{len(panels)} of {total} slice(s) plotted.")
 
 
 # --------------------------------------------------------------------------- #
@@ -445,17 +513,16 @@ VIEWER_HTML_PATH = Path(__file__).parent / "viewers" / "fr_diff_viewer.html"
 
 def build_payload(panels: list[Panel], csv_name: str) -> dict:
     multi = multi_run(panels)
-    tokens = all_stims(panels)
     lo, hi = pct_range(panels)
     return {
         "csv": csv_name,
         "runs": sorted({p.run for p in panels}, key=_natural_key),
         "multiRun": multi,
-        "stims": tokens,
-        "labels": {t: stim_label(t) for t in tokens},
+        "stims": list(REQUIRED_STIMS),
+        "labels": {t: stim_label(t) for t in REQUIRED_STIMS},
         "colors": {
-            "stim": {t: stim_color(t, i) for i, t in enumerate(tokens)},
-            "grounded": GROUNDED_COLOR, "grid": GRID_COLOR, "ink": INK_COLOR,
+            "stim": dict(STIM_COLORS),
+            "excluded": EXCLUDED_COLOR, "grid": GRID_COLOR, "ink": INK_COLOR,
             "zeroLine": ZERO_LINE_COLOR,
         },
         "range": {"min": lo, "max": hi},
@@ -470,10 +537,10 @@ def build_payload(panels: list[Panel], csv_name: str) -> dict:
             "channels": p.channels,
             "points": [{"c": d.channel, "t": d.stim, "p": d.pct,
                         "b": d.base_fr, "s": d.stim_fr} for d in p.diffs],
-            "grounded": [g.channel for g in p.grounded],
+            "excluded": p.unplotted,
             "missingBase": p.missing_base,
             "n": {"paired": len({d.channel for d in p.diffs}),
-                  "grounded": len(p.grounded),
+                  "excluded": len(p.unplotted),
                   "missingBase": len(p.missing_base)},
         } for p in panels],
     }
@@ -518,7 +585,7 @@ def resolve_slice(panels: list[Panel], wanted: str) -> str:
     if len(matches) > 1:
         sys.exit(f"Error: slice '{wanted}' is in more than one run. "
                  f"Use one of: {', '.join(m.id for m in matches)}")
-    sys.exit(f"Error: slice '{wanted}' has no paired panel. "
+    sys.exit(f"Error: slice '{wanted}' has no plotted panel. "
              f"Available: {', '.join(ids)}")
 
 
@@ -526,14 +593,15 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("input_csv", type=Path,
-                        help="CSV with FileName, Grp, Channel and FR columns, holding both "
-                             "the _base and the _stim recordings.")
+                        help="CSV with FileName, Grp, Channel and FR columns, holding the "
+                             f"_{BASELINE} and every _stim recording.")
     parser.add_argument("--winpath", action="store_true",
                         help="Treat input_csv (and -o/--output, if given) as Windows paths, e.g. "
                              "'C:\\Users\\...' as pasted from File Explorer, and convert them to "
                              "their WSL equivalent ('/mnt/c/Users/...'). Requires running under WSL.")
     parser.add_argument("--list", action="store_true",
-                        help="Print which slices paired and which did not, then exit.")
+                        help="Print which slices were plotted and why the rest were not, "
+                             "then exit.")
     parser.add_argument("--slice",
                         help="Slice to show on its own instead of the grid (e.g. CT1A, or "
                              "R250929/CT1A when the file holds several runs).")
@@ -565,10 +633,12 @@ def main():
         describe(panels, unpaired)
         return
     if not panels:
-        sys.exit("Error: no slice has both a _base and a _stim recording, so there is "
-                 "nothing to\n       compare. A pair needs the same run ID and the same "
-                 "slice, e.g.\n       R250929CT1A_DIV250_base and R250929CT1A_DIV250_stim1."
-                 "\n       Run with --list to see what the file holds.")
+        sys.exit(f"Error: no slice has a _{BASELINE} recording and all of "
+                 f"{', '.join('_' + t for t in REQUIRED_STIMS)},\n"
+                 f"       so there is nothing to plot. A set needs the same run ID and "
+                 f"the same slice, e.g.\n       R250929CT1A_DIV250_{BASELINE} and "
+                 f"R250929CT1A_DIV250_stim1.\n       Run with --list to see what the "
+                 f"file holds.")
 
     selected = resolve_slice(panels, args.slice) if args.slice else None
     initial = initial_state(selected, not args.per_panel_y, args.dpi)
